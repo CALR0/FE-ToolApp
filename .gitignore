@@ -1,0 +1,31 @@
+# Credenciales — nunca subir al repo
+config/perfiles.py
+
+# PyInstaller
+dist/
+build/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Entornos virtuales
+venv/
+.venv/
+env/
+
+# Logs generados por la app
+rndc_debug.log
+
+# Output de facturas (carpetas generadas en runtime)
+FACTURAS_GENERADAS_TSP/
+FACTURAS_GENERADAS_ELOGIA/
+FACTURAS_RECONSTRUIDAS_TSP/
+FACTURAS_RECONSTRUIDAS_ELOGIA/
+
+# Windows
+Thumbs.db
+desktop.ini
