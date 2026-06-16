@@ -19,6 +19,7 @@ from ui.consultar_remesas import ConsultarRemesasModule
 from ui.editar_xml import EditarXMLModule
 from ui.reconstruir_xml import ReconstruirXMLModule
 from ui.extraer_datos_rg import ExtraerDatosRGModule
+from ui.cruzar_remesas import CruzarRemesasModule
 
 
 class GeneradorApp:
@@ -312,6 +313,7 @@ class GeneradorApp:
         _mk_otros_sub_btn("editar",        "🖊",  "Editar XML")
         _mk_otros_sub_btn("reconstruir",   "🔧",  "Reconstruir XML")
         _mk_otros_sub_btn("extraer_rg",    "📄",  "Extraer datos RG")
+        _mk_otros_sub_btn("cruzar_remesas", "🔀", "Cruzar remesas")
 
         def _toggle_otros(e=None):
             if _otros_expanded.get():
@@ -376,7 +378,7 @@ class GeneradorApp:
                     _rem_expanded.set(True)
                     _rem_grp_arr.configure(text="▼")
             # Expandir el grupo Otros automáticamente si estaba cerrado
-            if key in ("editar","reconstruir","extraer_rg"):
+            if key in ("editar","reconstruir","extraer_rg","cruzar_remesas"):
                 if not _otros_expanded.get():
                     _otros_sub_frame.pack(fill=tk.X, after=_otros_grp_frm)
                     _otros_expanded.set(True)
@@ -390,7 +392,8 @@ class GeneradorApp:
         self._nav_activate["reconstruir"]         = lambda: _show_panel("reconstruir")
         self._nav_activate["consultar_remesas"]   = lambda: _show_panel("consultar_remesas")
         self._nav_activate["extraer_rg"]          = lambda: _show_panel("extraer_rg")
-        for key in ("generar","excel","rndc","editar","reconstruir","consultar_remesas","extraer_rg"):
+        self._nav_activate["cruzar_remesas"]      = lambda: _show_panel("cruzar_remesas")
+        for key in ("generar","excel","rndc","editar","reconstruir","consultar_remesas","extraer_rg","cruzar_remesas"):
             frm, ic, lbl = self._nav_buttons[key]
             act = self._nav_activate[key]
             for w in (frm, ic, lbl):
@@ -598,6 +601,26 @@ class GeneradorApp:
         _cv_rg.bind("<Leave>", lambda e: _cv_rg.unbind_all("<MouseWheel>"))
         self._extraer_rg_module = ExtraerDatosRGModule()
         self._extraer_rg_module._build(container=_inner_rg)
+
+        # ─── Panel 8: Cruzar remesas (RG vs Excel externo) ─────────────────────
+        panel_cruce = tk.Frame(content_area, bg=BG)
+        self._nav_panels["cruzar_remesas"] = panel_cruce
+        _wrap_cr = tk.Frame(panel_cruce, bg=BG)
+        _wrap_cr.pack(fill=tk.BOTH, expand=True)
+        _cv_cr = tk.Canvas(_wrap_cr, bg=BG, highlightthickness=0)
+        _sb_cr = ttk.Scrollbar(_wrap_cr, orient="vertical", command=_cv_cr.yview)
+        _cv_cr.configure(yscrollcommand=_sb_cr.set)
+        _sb_cr.pack(side=tk.RIGHT, fill=tk.Y)
+        _cv_cr.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        _inner_cr = tk.Frame(_cv_cr, bg=BG)
+        _cwin_cr = _cv_cr.create_window((0, 0), window=_inner_cr, anchor="nw")
+        _inner_cr.bind("<Configure>", lambda e: _cv_cr.configure(scrollregion=_cv_cr.bbox("all")))
+        _cv_cr.bind("<Configure>", lambda e: _cv_cr.itemconfig(_cwin_cr, width=e.width))
+        _cv_cr.bind("<Enter>", lambda e: _cv_cr.bind_all("<MouseWheel>",
+            lambda ev: _cv_cr.yview_scroll(int(-1*(ev.delta/120)), "units")))
+        _cv_cr.bind("<Leave>", lambda e: _cv_cr.unbind_all("<MouseWheel>"))
+        self._cruzar_remesas_module = CruzarRemesasModule()
+        self._cruzar_remesas_module._build(container=_inner_cr)
 
         # Activar panel inicial
         root.after(50, lambda: _show_panel("generar"))

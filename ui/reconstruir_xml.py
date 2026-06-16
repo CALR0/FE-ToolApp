@@ -191,6 +191,17 @@ class ReconstruirXMLModule:
         # Mostrar carpeta por defecto del perfil como referencia
         self._var_carpeta.trace_add("write", self._on_carpeta_changed)
 
+        # ── Opción: peso por defecto ──────────────────────────────────────────
+        opt_row = tk.Frame(body, bg=BG, pady=4)
+        opt_row.pack(fill=tk.X)
+        self._var_peso_fijo = tk.BooleanVar(value=False)
+        chk_peso = tk.Checkbutton(opt_row, text="Peso por defecto = 1 KGM",
+                                  variable=self._var_peso_fijo, font=FONT_BODY,
+                                  bg=BG, fg=TEXT2, selectcolor=BG3,
+                                  activebackground=BG, activeforeground=TEXT,
+                                  cursor="hand2")
+        chk_peso.pack(side=tk.LEFT)
+
         # ── Botón principal Reconstruir ───────────────────────────────────────
         pie = tk.Frame(body, bg=BG)
         pie.pack(fill=tk.X, pady=(0, 8))
@@ -357,11 +368,15 @@ class ReconstruirXMLModule:
             return []
 
     @staticmethod
-    def _actualizar_radicados_en_xml(ruta_xml, perfil, prefijo_remesa=False):
+    def _actualizar_radicados_en_xml(ruta_xml, perfil, prefijo_remesa=False, peso_fijo=None):
         """
         Abre el XML reconstruido, consulta el RNDC por cada consecutivo de remesa
         (Name=02), y sobreescribe el radicado (Name=01) y el peso (ValueQuantity)
         directamente en el archivo.
+
+        Si peso_fijo no es None (ej. "1"), el peso consultado en el RNDC se
+        ignora y se usa ese valor fijo para todas las remesas del archivo.
+
         Retorna lista de dicts {consecutivo, radicado, peso} con los valores aplicados.
         """
         try:
@@ -419,12 +434,13 @@ class ReconstruirXMLModule:
                 continue
             consec_rndc = ("0" + consec_raw) if prefijo_remesa else consec_raw
             ok, resultado = consultar_radicado_remesa(consec_rndc, perfil)
-            if not ok:
+
+            radicado = resultado.get("radicado", "") if ok else ""
+            peso     = peso_fijo if peso_fijo is not None else (resultado.get("peso", "") if ok else "")
+
+            if not radicado and peso == "":
                 resultados.append({"consecutivo": consec_raw, "radicado": "", "peso": ""})
                 continue
-
-            radicado = resultado.get("radicado", "")
-            peso     = resultado.get("peso", "")
 
             linea_nueva = linea_orig
             if radicado:
@@ -626,9 +642,11 @@ class ReconstruirXMLModule:
                         tags=(tag,))
                     self.win.update_idletasks()
 
+                    peso_fijo = "1" if self._var_peso_fijo.get() else None
                     resultados_rndc = self._actualizar_radicados_en_xml(
                         ruta_reconstruida, p,
-                        prefijo_remesa=p.get("prefijo_remesa", False))
+                        prefijo_remesa=p.get("prefijo_remesa", False),
+                        peso_fijo=peso_fijo)
 
                     primera = True
                     for rem in resultados_rndc:

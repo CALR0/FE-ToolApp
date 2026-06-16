@@ -41,11 +41,15 @@ class EditarXMLModule:
         self.var_cliente  = tk.StringVar()
         self.var_fecha    = tk.StringVar()
         self.var_total    = tk.StringVar()
+        self.var_nit_cliente    = tk.StringVar()
+        self.var_digito_cliente = tk.StringVar()
         self._numero_orig    = ""
         self._cufe_orig      = ""
         self._fecha_orig     = ""  # valor literal en el XML (puede ser DD-MM-YYYY o YYYY-MM-DD)
         self._fecha_orig_iso = ""  # siempre YYYY-MM-DD
         self._total_orig     = ""  # valor tal como está en el XML
+        self._nit_cliente_orig    = ""
+        self._digito_cliente_orig = ""
 
     # ── Construcción del panel (embebido en container) ────────────────────────
 
@@ -124,6 +128,22 @@ class EditarXMLModule:
                            highlightthickness=1, highlightbackground=BORDER,
                            state="readonly")
         ent_cli.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Fila NIT cliente + Dígito de verificación (editables)
+        row_nit = tk.Frame(gen_inner, bg=BG2)
+        row_nit.pack(fill=tk.X, pady=3)
+        tk.Label(row_nit, text="NIT cliente", font=FONT_BODY, bg=BG2,
+                 fg=TEXT2, width=14, anchor="w").pack(side=tk.LEFT)
+        tk.Entry(row_nit, textvariable=self.var_nit_cliente, font=FONT_BODY, width=18,
+                 bg=BG3, fg=TEXT, insertbackground=TEXT, relief="flat",
+                 highlightthickness=1, highlightbackground=BORDER,
+                 highlightcolor=ACCENT).pack(side=tk.LEFT, padx=(0, 16))
+        tk.Label(row_nit, text="Dígito verif.", font=FONT_BODY, bg=BG2,
+                 fg=TEXT2, width=10, anchor="w").pack(side=tk.LEFT)
+        tk.Entry(row_nit, textvariable=self.var_digito_cliente, font=FONT_BODY, width=6,
+                 bg=BG3, fg=TEXT, insertbackground=TEXT, relief="flat",
+                 highlightthickness=1, highlightbackground=BORDER,
+                 highlightcolor=ACCENT).pack(side=tk.LEFT)
 
         # Fila Fecha de generación (editable) + Fecha de vencimiento (calculada, solo lectura)
         row_fec = tk.Frame(gen_inner, bg=BG2)
@@ -231,11 +251,15 @@ class EditarXMLModule:
         self._fecha_orig      = ""
         self._fecha_orig_iso  = ""
         self._total_orig      = ""
+        self._nit_cliente_orig    = ""
+        self._digito_cliente_orig = ""
         self.var_numero.set("")
         self.var_cufe.set("")
         self.var_cliente.set("")
         self.var_fecha.set("")
         self.var_total.set("")
+        self.var_nit_cliente.set("")
+        self.var_digito_cliente.set("")
         self._lbl_archivo.configure(text="Ningún archivo cargado.", fg=TEXT2)
         self._lbl_count.configure(text="")
         self._lbl_status.configure(text="")
@@ -317,6 +341,32 @@ class EditarXMLModule:
                 mc = re.search(r"<cac:PartyName>\s*<cbc:Name>([^<]+)</cbc:Name>", bloque)
             nombre_cli = mc.group(1).strip() if mc else ""
         self.var_cliente.set(nombre_cli)
+
+        # NIT cliente y dígito de verificación.
+        # Algunos XML (generados por core/xml_generator.py) tienen PartyIdentification
+        # dentro del Customer; otros (ej. los reconstruidos del RNDC) no la incluyen y
+        # solo traen el dato en PartyTaxScheme / PartyLegalEntity. Se intenta en ese orden.
+        nit_cli, dig_cli = "", ""
+        if cust_start != -1:
+            bloque_id = inv_norm[cust_start:cust_end]
+            m_nit = re.search(
+                r'<cac:PartyIdentification>\s*<cbc:ID[^>]*schemeID="([^"]*)"[^>]*>([^<]+)</cbc:ID>',
+                bloque_id)
+            if not m_nit:
+                m_nit = re.search(
+                    r'<cac:PartyTaxScheme>.*?<cbc:CompanyID[^>]*schemeID="([^"]*)"[^>]*>([^<]+)</cbc:CompanyID>',
+                    bloque_id, re.DOTALL)
+            if not m_nit:
+                m_nit = re.search(
+                    r'<cac:PartyLegalEntity>.*?<cbc:CompanyID[^>]*schemeID="([^"]*)"[^>]*>([^<]+)</cbc:CompanyID>',
+                    bloque_id, re.DOTALL)
+            if m_nit:
+                dig_cli = m_nit.group(1).strip()
+                nit_cli = m_nit.group(2).strip()
+        self.var_nit_cliente.set(nit_cli)
+        self.var_digito_cliente.set(dig_cli)
+        self._nit_cliente_orig    = nit_cli
+        self._digito_cliente_orig = dig_cli
 
         # Valor total (PayableAmount dentro del Invoice)
         m_total = re.search(r"<cbc:PayableAmount[^>]*>([^<]+)</cbc:PayableAmount>", inv_norm)
@@ -646,6 +696,30 @@ class EditarXMLModule:
                         f"La fecha '{fecha_nueva}' no tiene el formato YYYY-MM-DD.\n"
                         "Las fechas no fueron actualizadas.")
 
+            # ── NIT cliente + Dígito de verificación ──────────────────────────
+            nit_nuevo = self.var_nit_cliente.get().strip()
+            dig_nuevo = self.var_digito_cliente.get().strip()
+            if nit_nuevo and dig_nuevo and (
+                nit_nuevo != self._nit_cliente_orig or dig_nuevo != self._digito_cliente_orig
+            ):
+                cust_start = contenido_nuevo.find("<cac:AccountingCustomerParty")
+                cust_end_tag = contenido_nuevo.find("</cac:AccountingCustomerParty>", cust_start)
+                if cust_start != -1 and cust_end_tag != -1:
+                    cust_end = cust_end_tag + len("</cac:AccountingCustomerParty>")
+                    bloque = contenido_nuevo[cust_start:cust_end]
+                    bloque_nuevo = bloque
+                    # Reemplaza únicamente dentro del bloque del Customer, sin tocar
+                    # el resto del XML (ej. el NIT de la UT/socio en otro lugar).
+                    if self._digito_cliente_orig:
+                        bloque_nuevo = bloque_nuevo.replace(
+                            f'schemeID="{self._digito_cliente_orig}"', f'schemeID="{dig_nuevo}"')
+                    if self._nit_cliente_orig:
+                        bloque_nuevo = bloque_nuevo.replace(
+                            f">{self._nit_cliente_orig}<", f">{nit_nuevo}<")
+                    contenido_nuevo = contenido_nuevo[:cust_start] + bloque_nuevo + contenido_nuevo[cust_end:]
+                self._nit_cliente_orig    = nit_nuevo
+                self._digito_cliente_orig = dig_nuevo
+
             with open(self.ruta_xml, "w", encoding="utf-8") as f:
                 f.write(contenido_nuevo)
 
@@ -655,6 +729,8 @@ class EditarXMLModule:
             _f_guardada          = self.var_fecha.get().strip()
             self._fecha_orig     = _f_guardada
             self._fecha_orig_iso = _f_guardada
+            self.var_nit_cliente.set(self._nit_cliente_orig)
+            self.var_digito_cliente.set(self._digito_cliente_orig)
 
             self._lbl_status.configure(text=f"  ✓ Guardado correctamente: {self.ruta_xml.name}", fg=SUCCESS)
             # Flash del botón
