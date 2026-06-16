@@ -1,6 +1,6 @@
 # FE-Tool — Facturación Electrónica Colombia (DIAN)
 
-Aplicación de escritorio para la gestión de facturación electrónica UBL 2.1 bajo la normativa DIAN colombiana, usada por la **Unión Temporal American Logistic UT** en sus dos perfiles operativos (UT TSP y UT Elogia).
+Aplicación de escritorio para la gestión de facturación electrónica UBL 2.1 bajo la normativa DIAN colombiana.
 
 ## ¿Qué hace?
 
