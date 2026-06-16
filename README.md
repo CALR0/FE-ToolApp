@@ -52,6 +52,4 @@ Compilable como ejecutable Windows con PyInstaller:
 pyinstaller --onefile --windowed --icon=icono.ico main.py
 ```
 
-## Repo
-
-[github.com/CALR0/FE-ToolApp](https://github.com/CALR0/FE-ToolApp)
+Todos los derechos reservados © 2026
