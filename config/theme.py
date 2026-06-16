@@ -1,0 +1,20 @@
+BG          = "#0f1117"   # fondo principal
+BG2         = "#1a1d27"   # cards
+BG3         = "#22263a"   # inputs / filas alternas
+ACCENT      = "#4f8ef7"   # azul primario
+ACCENT2     = "#6c63ff"   # violeta secundario
+SUCCESS     = "#22c55e"
+WARNING     = "#f59e0b"
+DANGER      = "#ef4444"
+TEXT        = "#e2e8f0"
+TEXT2       = "#8892a4"
+BORDER      = "#2d3348"
+HOVER_ADD   = "#1e3a5f"
+HOVER_DEL   = "#3b1a1a"
+RADIUS      = 8
+
+FONT_H1     = ("Segoe UI", 15, "bold")
+FONT_H2     = ("Segoe UI", 10, "bold")
+FONT_BODY   = ("Segoe UI", 9)
+FONT_SMALL  = ("Segoe UI", 8)
+FONT_MONO   = ("Consolas", 9)
