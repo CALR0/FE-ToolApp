@@ -1,4 +1,4 @@
-# FE-Tool — Facturación Electrónica Colombia (DIAN)
+# FE-Tool
 
 Aplicación de escritorio para la gestión de facturación electrónica UBL 2.1 bajo la normativa DIAN colombiana.
 
