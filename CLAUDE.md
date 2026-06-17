@@ -44,7 +44,8 @@ testap/
 │   ├── editar_xml.py              ← EditarXMLModule: edición inline de campos de un XML existente
 │   ├── reconstruir_xml.py         ← ReconstruirXMLModule: aplica transformaciones DIAN a XMLs originales
 │   ├── extraer_datos_rg.py        ← ExtraerDatosRGModule: extrae datos de PDFs de facturas y exporta a Excel
-│   └── cruzar_remesas.py          ← CruzarRemesasModule: cruza el Excel de "Extraer Datos RG" con otro Excel externo
+│   ├── cruzar_remesas.py          ← CruzarRemesasModule: cruza el Excel de "Extraer Datos RG" con otro Excel externo
+│   └── corregir_remesa.py         ← CorregirRemesaModule: consulta y corrige una remesa en el RNDC (proceso 38)
 │
 ├── utils/                         ← Utilidades transversales
 │   ├── __init__.py
@@ -77,7 +78,7 @@ Ventana principal. Construye:
 - **Header** con logo FE-Tool
 - **Pill bar** de selección de perfil (ut_tsp / ut_elogia)
 - **Sidebar** con grupos colapsables: Facturación / Remesas / Otros
-- **8 paneles** de contenido (uno por módulo), mostrados/ocultados con `pack/pack_forget`
+- **9 paneles** de contenido (uno por módulo), mostrados/ocultados con `pack/pack_forget`
 - **Barra de estado** inferior
 
 Al cambiar de perfil notifica activamente a `_rndc_uploader`, `_excel_loader` y `_reconstruir_module`.
@@ -131,6 +132,26 @@ Al exportar, parte del Excel de RG **completo** (todas sus columnas/filas origin
 
 > Nota sobre conteos: como `¿Coinciden remesas?` cuenta **filas**, si el otro Excel trae remesas duplicadas o filas con consecutivo en blanco, el conteo puede no cuadrar con los consecutivos únicos visibles.
 
+### `ui/corregir_remesa.py` — CorregirRemesaModule
+Corrige una remesa en el RNDC vía **proceso 38** (`tipo=1`), replicando el formulario web del RNDC. Flujo:
+1. Escribir consecutivo → **Consultar remesa** (`consultar_remesa_completa`, proceso 3 / `tipo=3` / `variables=*`).
+2. Se muestran los **datos actuales** (solo lectura) y se prellena internamente el conjunto base de variables (`BASE_FIELDS`).
+3. Elegir **"Opción a Corregir"** (`CODIGOCAMBIO`) → el formulario es **dinámico**: solo aparecen los campos editables de esa opción (igual que la web). Mapeo `OPCION_CAMPOS`:
+   - `1` Cambio Cita Cargue → fecha + hora cargue
+   - `2` Cambio Cita Descargue → fecha + hora descargue
+   - `3` Cambio Sede Descargue → tipo/núm ID + sede destinatario
+   - `4` Cambio de Generador → tipo/núm ID + sede propietario
+   - `5` Cambio Serial Contenedor → `contenedorSerial`
+4. Elegir **"Motivo del Cambio"** (`MOTIVOCAMBIO`): 1=Incumpl. Generador, 2=Incumpl. Titular Manifiesto, 3=Decisión Generador, 4=Decisión Patio/Puerto.
+5. **Guardar remesa corregida** (`corregir_remesa`) con **confirmación previa**. Se envía el **conjunto base completo** (prellenado del consult) con los campos de la opción sobrescritos + `MOTIVOCAMBIO` + `CODIGOCAMBIO`.
+
+Detalles importantes:
+- El usuario **solo edita los campos de la opción elegida**; el resto de la remesa se reenvía tal cual vino del consult (el proceso 38 espera el conjunto completo, no solo los campos cambiados).
+- Solo se envían **códigos** (`codOperacionTransporte=G`), no las descripciones legibles (`operaciontransporte=General`).
+- Mapeo de nombre distinto consulta→envío: consulta devuelve `horacitapactadadescargueremesa`, el proceso 38 espera `HORACITAPACTADADESCARGUE`.
+- En el `<documento>` de la consulta los valores van **entre comillas simples** (`'8901031611'`); omitirlas causa `ORA-01722: invalid number`.
+- Respeta `prefijo_remesa` del perfil (antepone `0` al consecutivo en ut_elogia).
+
 ---
 
 ## Perfiles — config/perfiles.py
@@ -156,6 +177,8 @@ Cada perfil tiene:
 | `_fmt_valor(valor)` | `core/xml_generator.py` | Convierte float → string sin decimales si es entero ("1777777") |
 | `reconstruir_factura(...)` | `core/xml_transformer.py` | Aplica 11 transformaciones DIAN al XML |
 | `consultar_radicado_remesa(consecutivo, perfil)` | `services/rndc_service.py` | Retorna `(ok: bool, resultado: dict)` con `radicado` y `peso` |
+| `consultar_remesa_completa(consecutivo, perfil)` | `services/rndc_service.py` | Proceso 3 / `tipo=3` / `variables=*`. Retorna `(ok, dict)` con TODOS los campos de la remesa |
+| `corregir_remesa(variables, perfil)` | `services/rndc_service.py` | Proceso 38 / `tipo=1`. Envía a `rndcws.mintransporte.gov.co:8080` (sin "2"). `variables` es dict (orden respetado). Retorna `(ok, {ingresoid})` |
 | `resource_path(relative)` | `utils/helpers.py` | Resuelve rutas para PyInstaller: sube un nivel desde `utils/` para encontrar archivos en la raíz |
 
 ---

@@ -194,3 +194,266 @@ def consultar_radicado_remesa(consecutivo_remesa, perfil):
 
     _log(f"Sin INGRESOID ni error reconocible. inner completo: {inner}")
     return False, f"Remesa no encontrada. Respuesta: {inner.strip()[:200]}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONSULTA COMPLETA DE REMESA — proceso 3, tipo 3, variables=* (todos los campos)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RNDC_CONSULTA_FULL_TMPL = """<?xml version='1.0' encoding='ISO-8859-1' ?>
+<root>
+  <acceso>
+    <username>{usuario}</username>
+    <password>{password}</password>
+  </acceso>
+  <solicitud>
+    <tipo>3</tipo>
+    <procesoid>3</procesoid>
+  </solicitud>
+  <variables>*</variables>
+  <documento>
+    <NUMNITEMPRESATRANSPORTE>'{nit_empresa}'</NUMNITEMPRESATRANSPORTE>
+    <CONSECUTIVOREMESA>'{consecutivo_remesa}'</CONSECUTIVOREMESA>
+  </documento>
+</root>"""
+
+
+def consultar_remesa_completa(consecutivo_remesa, perfil, timeout=20):
+    """
+    Consulta TODOS los campos de una remesa (proceso 3, tipo 3, `variables=*`).
+    Pensada para prellenar el módulo de "Corregir Remesa".
+
+    Parámetros:
+        consecutivo_remesa : str  — consecutivo de la remesa (tal cual; el caller
+                                    aplica prefijo si el perfil lo requiere).
+        perfil             : dict — usa rndc_usuario / rndc_password / nit_socio.
+        timeout            : int  — segundos de espera.
+
+    Retorna:
+        (ok: bool, resultado)
+        Si ok=True  → dict {tag: valor} con todos los campos del <documento>.
+        Si ok=False → str con el mensaje de error.
+    """
+    if not REQUESTS_OK:
+        return False, "La librería 'requests' no está instalada."
+
+    import html as _html, xml.etree.ElementTree as ET, re as _re
+
+    usuario     = perfil.get("rndc_usuario", "")
+    password    = perfil.get("rndc_password", "")
+    nit_empresa = perfil.get("nit_socio", "")
+
+    rndc_xml = _RNDC_CONSULTA_FULL_TMPL.format(
+        usuario=_html.escape(usuario),
+        password=_html.escape(password),
+        nit_empresa=_html.escape(nit_empresa),
+        consecutivo_remesa=_html.escape(str(consecutivo_remesa)),
+    )
+    soap_body = _RNDC_CONSULTA_SOAP_ENVELOPE.format(
+        rndc_xml_escaped=_html.escape(rndc_xml)
+    )
+
+    url     = _RNDC_CONSULTA_ENDPOINT + _RNDC_CONSULTA_SOAP_PATH
+    headers = {
+        "Content-Type": "text/xml; charset=UTF-8",
+        "SOAPAction":   _RNDC_CONSULTA_ACTION,
+    }
+
+    try:
+        resp = _requests.post(url, data=soap_body.encode("utf-8"),
+                              headers=headers, timeout=timeout)
+    except _requests.exceptions.ConnectionError:
+        return False, f"Sin conexión a {_RNDC_CONSULTA_ENDPOINT}"
+    except _requests.exceptions.Timeout:
+        return False, f"Tiempo de espera agotado ({timeout}s)"
+    except Exception as e:
+        return False, str(e)[:180]
+
+    inner_raw = None
+    m = _re.search(r'<[^>]*:?return[^>]*>(.*?)</[^>]*:?return>',
+                   resp.text, _re.DOTALL | _re.IGNORECASE)
+    if m:
+        inner_raw = m.group(1).strip()
+    if not inner_raw:
+        m2 = _re.search(r'(<root[^>]*>.*?</root>)', resp.text,
+                        _re.DOTALL | _re.IGNORECASE)
+        if m2:
+            inner_raw = m2.group(1).strip()
+    if not inner_raw:
+        return False, f"Respuesta no reconocida: {resp.text.strip()[:200]}"
+
+    inner = _html.unescape(inner_raw)
+
+    def _parse(texto):
+        for intento in (texto, texto.encode("iso-8859-1"),
+                        _re.sub(r'<\?xml[^?]*\?>', '', texto, count=1).strip()):
+            try:
+                return ET.fromstring(intento)
+            except Exception:
+                continue
+        return None
+
+    root_el = _parse(inner)
+    if root_el is None:
+        return False, f"No se pudo parsear la respuesta: {inner[:200]}"
+
+    # Error reportado por el RNDC
+    for tag in (".//ErrorMSG", ".//error"):
+        el = root_el.find(tag)
+        if el is not None and el.text and el.text.strip():
+            return False, el.text.strip()
+
+    # Éxito: leer todos los hijos del <documento>
+    doc_el = root_el.find(".//documento")
+    if doc_el is None:
+        return False, f"Sin <documento> en la respuesta: {inner.strip()[:200]}"
+
+    campos = {child.tag: (child.text or "").strip() for child in doc_el}
+    if not campos:
+        return False, "El <documento> no trajo campos."
+    return True, campos
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CORREGIR REMESA — RNDC proceso 38 (tipo 1 = enviar/registrar)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Endpoint para CORREGIR remesa (proceso 38). Usa rndcws (sin "2"), que es el
+# host al que apunta el WSDL del web service del RNDC.
+_RNDC_REMESA_ENDPOINT  = "http://rndcws.mintransporte.gov.co:8080"
+_RNDC_REMESA_SOAP_PATH = "/soap/IBPMServices"
+_RNDC_REMESA_ACTION    = "urn:BPMServicesIntf-IBPMServices#AtenderMensajeRNDC"
+
+
+def corregir_remesa(variables, perfil, timeout=20):
+    """
+    Corrige una remesa en el RNDC usando el proceso 38 (tipo 1 = enviar info).
+
+    No usa el elemento <documento> (eso es solo para consultas). La remesa a
+    corregir se identifica por las variables que envíes (típicamente
+    NUMNITEMPRESATRANSPORTE + consecutivoRemesa, o el INGRESOID/radicado).
+
+    Parámetros:
+        variables : dict  — pares {nombre_variable: valor} EXACTAMENTE como el
+                            Diccionario de Datos del proceso 38. El orden del dict
+                            se respeta en el XML (Python 3.7+). Las credenciales NO
+                            van aquí: se toman del perfil.
+        perfil    : dict  — perfil activo (usa rndc_usuario / rndc_password).
+        timeout   : int   — segundos de espera (default 20).
+
+    Retorna:
+        (ok: bool, resultado)
+        Si ok=True  → resultado es dict {'ingresoid': str, 'respuesta': str}
+        Si ok=False → resultado es str con el mensaje de error.
+
+    Ejemplo de uso:
+        vars_ = {
+            "NUMNITEMPRESATRANSPORTE": "8190041165",
+            "consecutivoRemesa":       "0101210626",
+            "codOperacionTransporte":  "G",
+            "cantidadCargada":         "10500",
+            "descripcionCortaProducto":"B-100",
+            "MOTIVOCAMBIO":            "1",
+            "CODIGOCAMBIO":            "2",
+            "observaciones":           "B-100.",
+            # ... resto de campos a corregir
+        }
+        ok, res = corregir_remesa(vars_, perfil)
+    """
+    if not REQUESTS_OK:
+        return False, "La librería 'requests' no está instalada."
+
+    import html as _html, xml.etree.ElementTree as ET, re as _re
+
+    usuario  = perfil.get("rndc_usuario", "")
+    password = perfil.get("rndc_password", "")
+
+    if not isinstance(variables, dict) or not variables:
+        return False, "Debes pasar un dict de variables no vacío."
+
+    # 1. Construir bloque <variables> respetando el orden del dict
+    bloque_vars = "".join(
+        f"    <{nombre}>{_html.escape('' if valor is None else str(valor))}</{nombre}>\n"
+        for nombre, valor in variables.items()
+    )
+
+    rndc_xml = (
+        "<?xml version='1.0' encoding='ISO-8859-1' ?>\n"
+        "<root>\n"
+        "  <acceso>\n"
+        f"    <username>{_html.escape(usuario)}</username>\n"
+        f"    <password>{_html.escape(password)}</password>\n"
+        "  </acceso>\n"
+        "  <solicitud>\n"
+        "    <tipo>1</tipo>\n"
+        "    <procesoid>38</procesoid>\n"
+        "  </solicitud>\n"
+        "  <variables>\n"
+        f"{bloque_vars}"
+        "  </variables>\n"
+        "</root>"
+    )
+
+    # 2. Empaquetar en el sobre SOAP (escapando el XML interno)
+    soap_body = _RNDC_CONSULTA_SOAP_ENVELOPE.format(
+        rndc_xml_escaped=_html.escape(rndc_xml)
+    )
+
+    url     = _RNDC_REMESA_ENDPOINT + _RNDC_REMESA_SOAP_PATH
+    headers = {
+        "Content-Type": "text/xml; charset=UTF-8",
+        "SOAPAction":   _RNDC_REMESA_ACTION,
+    }
+
+    try:
+        resp = _requests.post(url, data=soap_body.encode("utf-8"),
+                              headers=headers, timeout=timeout)
+    except _requests.exceptions.ConnectionError:
+        return False, f"Sin conexión a {_RNDC_REMESA_ENDPOINT}"
+    except _requests.exceptions.Timeout:
+        return False, f"Tiempo de espera agotado ({timeout}s)"
+    except Exception as e:
+        return False, str(e)[:180]
+
+    # 3. Extraer el XML de respuesta (<return> o <root>)
+    inner_raw = None
+    m = _re.search(r'<[^>]*:?return[^>]*>(.*?)</[^>]*:?return>',
+                   resp.text, _re.DOTALL | _re.IGNORECASE)
+    if m:
+        inner_raw = m.group(1).strip()
+    if not inner_raw:
+        m2 = _re.search(r'(<root[^>]*>.*?</root>)', resp.text,
+                        _re.DOTALL | _re.IGNORECASE)
+        if m2:
+            inner_raw = m2.group(1).strip()
+    if not inner_raw:
+        return False, f"Respuesta no reconocida: {resp.text.strip()[:200]}"
+
+    inner = _html.unescape(inner_raw)
+
+    # 4. Parsear resultado
+    def _parse(texto):
+        for intento in (texto, texto.encode("iso-8859-1"),
+                        _re.sub(r'<\?xml[^?]*\?>', '', texto, count=1).strip()):
+            try:
+                return ET.fromstring(intento)
+            except Exception:
+                continue
+        return None
+
+    root_el = _parse(inner)
+    if root_el is None:
+        return False, f"No se pudo parsear la respuesta: {inner[:200]}"
+
+    # Éxito: el RNDC devuelve <ingresoid>
+    ing = root_el.find(".//ingresoid")
+    if ing is not None and ing.text and ing.text.strip():
+        return True, {"ingresoid": ing.text.strip(), "respuesta": inner.strip()}
+
+    # Error reportado por el RNDC
+    for tag in (".//ErrorMSG", ".//error"):
+        el = root_el.find(tag)
+        if el is not None and el.text and el.text.strip():
+            return False, el.text.strip()
+
+    return False, f"Respuesta sin INGRESOID ni error: {inner.strip()[:200]}"
