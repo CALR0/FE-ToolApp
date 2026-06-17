@@ -17,8 +17,9 @@ La app fue refactorizada de un monolito de ~5700 líneas (`generador_xml_tsp.py`
 
 ```
 testap/
-├── main.py                        ← Punto de entrada: python main.py
+├── main.py                        ← Punto de entrada: python main.py (llama multiprocessing.freeze_support())
 ├── CLAUDE.md                      ← Este archivo
+├── FE-Tool.spec                   ← Spec de PyInstaller (compilación oficial)
 │
 ├── config/                        ← Constantes globales (sin dependencias internas)
 │   ├── __init__.py
@@ -82,7 +83,11 @@ Ventana principal. Construye:
 Al cambiar de perfil notifica activamente a `_rndc_uploader`, `_excel_loader` y `_reconstruir_module`.
 
 ### `ui/excel_loader.py` — ExcelLoaderWindow
-Carga un archivo Excel, mapea columnas a campos de factura (consecutivo, radicado, valor, peso, descripción, CUFE, fecha) y genera XMLs en lote. Consulta el RNDC automáticamente si hay consecutivos.
+Carga un archivo Excel (con **selector de hoja**), mapea columnas a campos de factura (consecutivo, radicado, valor, peso, descripción, CUFE, fecha) y genera XMLs en lote. Consulta el RNDC automáticamente si hay consecutivos.
+
+Mapeo **opcional de cliente por columna**: campos `NIT cliente` y `Nombre cliente`. Si se mapean, cada factura usa su propio NIT/nombre del Excel; **el dígito de verificación se toma del último dígito del NIT** (ej. `8000213085` → NIT `800021308`, dígito `5`, limpiando cualquier formato). Si no se mapean, usa los valores fijos de la sección "Datos del Cliente". Auto-mapea las columnas `nit`/`nombre_cliente` que exporta `extraer_datos_rg.py` (con guard para que `nit` no colisione con `valor_unitario`).
+
+**Filtro de generación** (`FILTROS_GEN`): combobox que permite generar solo un subconjunto cuando el Excel trae las columnas de validación del cruce (`¿Coinciden remesas?`, `¿Coincide valor factura con RG?`, `Reconstruir`). Opciones: Todas / Solo Reconstruir=Sí / Coinciden remesas NO valor / Coincide valor NO remesas / NO coinciden remesas / NO coincide valor. Es **opcional**: por defecto "Todas (sin filtro)" y funciona con cualquier Excel normal; solo si se elige un filtro y faltan esas columnas, avisa y no genera (helpers `_cols_cruce`, `_pasa_filtro`, `_es_si`).
 
 ### `ui/rndc_uploader.py` — RndcUploaderWindow
 Sube archivos XML al portal web del RNDC mediante requests HTTP. Registra logs en `rndc_debug.log` en la raíz del proyecto.
@@ -91,21 +96,40 @@ Sube archivos XML al portal web del RNDC mediante requests HTTP. Registra logs e
 Interfaz para consultar remesas individuales o en lote al RNDC SOAP WS. Muestra consecutivo, radicado e INGRESOID.
 
 ### `ui/editar_xml.py` — EditarXMLModule
-Abre un XML de factura existente, parsea sus remesas (InvoiceLine) y permite edición inline (doble clic en celda). Actualiza N° factura, CUFE, fecha, valor total, **NIT cliente y dígito de verificación** (editables, ver convención abajo), y por remesa: consecutivo, radicado, valor, peso, descripción. Al cargar consulta el RNDC automáticamente.
+Abre un XML de factura existente, parsea sus remesas (InvoiceLine) y permite edición inline (doble clic en celda). Actualiza N° factura, CUFE, fecha, valor total, **Cliente (nombre), NIT cliente y dígito de verificación** (todos editables, ver convención abajo), y por remesa: consecutivo, radicado, valor, peso, descripción. Al cargar consulta el RNDC automáticamente.
+
+Botones **`+` / `−`** para añadir o quitar remesas: `+` clona el primer `InvoiceLine` del XML con campos editables; `−` elimina la fila seleccionada (mínimo 1). Al guardar se reconstruye la lista completa de `InvoiceLine`, se renumeran los `<cbc:ID>` y se actualiza `<cbc:LineCountNumeric>`.
+
+Al editar **nombre/NIT/dígito del cliente**, el reemplazo se aplica tanto al `AccountingCustomerParty` (dentro del CDATA) como al `<cac:ReceiverParty>` externo del AttachedDocument (el que está **antes del primer CDATA**, para no tocar el ReceiverParty de la ApplicationResponse que es la UT). Esto evita el error DIAN **FAC025** (identificación del adquirente no coincide entre la factura y el AttachedDocument). La edición de fecha solo se dispara si el usuario realmente cambió el valor (acepta entrada en `DD-MM-YYYY` o `YYYY-MM-DD`).
 
 ### `ui/reconstruir_xml.py` — ReconstruirXMLModule
 Aplica las 11 transformaciones DIAN definidas en `core/xml_transformer.py` a XMLs originales. Hace preprocesamiento (limpia ShareholderParty anteriores), llama a `reconstruir_factura()` sobre un archivo temporal, renombra el output al nombre original, y actualiza radicado/peso desde el RNDC. Checkbox **"Peso por defecto = 1 KGM"**: si está marcado, ignora el peso devuelto por el RNDC y fuerza `1` en todas las remesas del XML reconstruido (el radicado sigue consultándose normalmente).
 
 ### `ui/extraer_datos_rg.py` — ExtraerDatosRGModule
-Extrae datos estructurados de PDFs de facturas electrónicas usando `pdfplumber`. Expande líneas según cantidad de remesas y exporta a Excel/CSV. Campo opcional: usar Referencia del PDF como consecutivo_remesa. La columna `consecutivo_remesa` del export suele quedar vacía (los PDF de RG no la traen).
+Extrae datos estructurados de PDFs de facturas electrónicas usando `pdfplumber` y exporta a Excel/CSV. Procesa los PDFs **en paralelo** con `ProcessPoolExecutor` (worker a nivel de módulo `_procesar_pdf_worker`, tope de 8 procesos) — por eso `main.py` llama `multiprocessing.freeze_support()`. Los resultados llegan desordenados y se reensamblan por índice para **preservar el orden de los archivos** (necesario para el cruce posicional).
+
+**Valor total de la factura = SUBTOTAL** del PDF (antes de retenciones), con fallback a "TOTAL A PAGAR".
+
+**Lógica de cantidad/expansión** (`_expandir_lineas`, constante `MAX_CANTIDAD_EXPANSION = 100`):
+- Si la columna CANTIDAD es un **entero entre 1 y 100** → se interpreta como conteo de remesas y la línea se **expande** en esas N filas, repartiendo el **VR.TOTAL** de la línea entre ellas (`vr_total / N`).
+- Si es **decimal** (ej. `12,350` = 12.35, un peso) o un **entero > 100** → es **una sola remesa** con valor = VR.TOTAL de la línea.
+- La columna `cantidad_remesas_rg` refleja el **total de remesas de la factura** (mismo valor en todas sus filas), no el conteo por línea.
+
+Columnas exportadas: `numero_factura, fecha_generacion, cufe, nit, nombre_cliente, descripcion, consecutivo_remesa, radicado, valor_unitario, valor_total_factura, cantidad_remesas_rg`. El `nit` es el del **cliente/adquirente** (tras "CLIENTE :", con fallback "NOMBRE:"); no el de la UT emisora. La columna `consecutivo_remesa` suele quedar vacía (los PDF de RG no la traen). Campo opcional: usar Referencia del PDF como consecutivo_remesa.
 
 ### `ui/cruzar_remesas.py` — CruzarRemesasModule
-Cruza el Excel exportado por "Extraer Datos RG" con otro Excel externo (que sí tiene consecutivos de remesa reales y valores unitarios), agrupando ambos por **N° Factura**. Mapeo de columnas estilo `excel_loader.py` (combobox con auto-detección). Por factura compara:
-- `¿Coinciden remesas?` — cantidad de líneas del RG vs cantidad de remesas del otro Excel (solo cuenta, no identidad).
+Cruza el Excel exportado por "Extraer Datos RG" con otro Excel externo (que sí tiene consecutivos de remesa reales y valores unitarios), agrupando ambos por **N° Factura**. Ambos archivos tienen **selector de hoja** independiente. Mapeo de columnas estilo `excel_loader.py` (combobox con auto-detección). Por factura compara:
+- `¿Coinciden remesas?` — **cantidad de filas** del RG vs cantidad de filas del otro Excel (solo cuenta, no identidad). Igualdad exacta → Sí; cualquier diferencia (más o menos) → No.
 - `¿Coincide valor factura con RG?` — suma de valores unitarios del otro Excel vs valor total de factura del RG (tolerancia $1).
 - `Reconstruir` — `Sí` solo si ambas anteriores son `Sí`.
 
-Al exportar, parte del Excel de RG **completo** (todas sus columnas/filas originales, sin la columna `consecutivo_remesa` que se descarta por venir vacía) y le anexa las 3 columnas de validación más `Consecutivo Remesa (Otro Excel)` — este último se asigna **posicionalmente** (línea N del RG ↔ remesa N del otro Excel, en orden de aparición); si el otro Excel tiene menos remesas que líneas el RG, las líneas sobrantes quedan vacías (no es un cruce por valor, es por orden de aparición).
+Valores monetarios robustos vía `_to_num` (quita `$`, espacios y separadores antes de parsear, así una columna en texto con `$` no rompe la suma). Consecutivos limpios vía `_fmt_consec` (NaN→vacío, quita el `.0` que pandas añade a enteros leídos como float).
+
+**Filtro de exportación** (`FILTROS_EXPORT`, helper `_pasa_filtro`): Todas / Solo Reconstruir=Sí / Coinciden remesas NO valor / Coincide valor NO remesas / NO coinciden remesas / NO coincide valor / Reconstruir=No. Genera solo el subconjunto elegido (con todas las columnas del RG), evitando filtrar a mano en Excel.
+
+Al exportar, parte del Excel de RG **completo** (todas sus columnas/filas originales, sin la columna `consecutivo_remesa` que se descarta por venir vacía) y le anexa las 3 columnas de validación más `Consecutivo Remesa (Otro Excel)` — este último se asigna **posicionalmente** (línea N del RG ↔ remesa N del otro Excel, en orden de aparición); si el otro Excel tiene menos remesas que líneas el RG, las líneas sobrantes quedan vacías; si tiene **más**, los consecutivos sobrantes no se muestran. (No es un cruce por valor, es por orden de aparición.)
+
+> Nota sobre conteos: como `¿Coinciden remesas?` cuenta **filas**, si el otro Excel trae remesas duplicadas o filas con consecutivo en blanco, el conteo puede no cuadrar con los consecutivos únicos visibles.
 
 ---
 
@@ -146,7 +170,9 @@ Cada perfil tiene:
   re.sub(r'<cac:InvoiceLine\s+xmlns="[^"]*"(?:\s+xmlns:[^=]+="[^"]*")*\s*>', "<cac:InvoiceLine>", inv)
   ```
 - **Perfiles**: siempre obtener el perfil activo mediante `self.perfil_fn()` (callable), nunca como valor estático, para respetar cambios en tiempo de ejecución.
-- **NIT cliente / dígito de verificación en `AccountingCustomerParty`**: no todos los XML tienen la misma estructura. Los generados por `xml_generator.py` incluyen `<cac:PartyIdentification><cbc:ID schemeID="{dig}">{nit}</cbc:ID></cac:PartyIdentification>`; los XML reconstruidos/respuesta del RNDC (ej. `AttachedDocument`) **no la tienen** y el dato solo existe en `PartyTaxScheme`/`PartyLegalEntity` (`<cbc:CompanyID schemeID="{dig}">{nit}</cbc:CompanyID>`). `editar_xml.py` intenta `PartyIdentification` primero y cae a `PartyTaxScheme`/`PartyLegalEntity` si no la encuentra. Al guardar, el reemplazo de NIT/dígito se hace por substitución de texto **acotada al bloque `AccountingCustomerParty`** (nunca global en todo el XML), para no afectar NITs iguales en otras secciones (UT, socio, etc.).
+- **NIT cliente / dígito de verificación en `AccountingCustomerParty`**: no todos los XML tienen la misma estructura. Los generados por `xml_generator.py` incluyen `<cac:PartyIdentification><cbc:ID schemeID="{dig}">{nit}</cbc:ID></cac:PartyIdentification>`; los XML reconstruidos/respuesta del RNDC (ej. `AttachedDocument`) **no la tienen** y el dato solo existe en `PartyTaxScheme`/`PartyLegalEntity` (`<cbc:CompanyID schemeID="{dig}">{nit}</cbc:CompanyID>`). `editar_xml.py` intenta `PartyIdentification` primero y cae a `PartyTaxScheme`/`PartyLegalEntity` si no la encuentra. Al guardar, el reemplazo de NIT/dígito/nombre se hace por substitución de texto **acotada a bloques** (nunca global en todo el XML), para no afectar NITs/nombres iguales en otras secciones (UT, socio, etc.). Se reemplaza en **dos** lugares: (1) el `AccountingCustomerParty` dentro del CDATA, y (2) el `<cac:ReceiverParty>` externo del AttachedDocument (acotado a lo que está **antes del primer `<![CDATA[`** para no tocar el ReceiverParty de la ApplicationResponse, que corresponde a la UT). Mantener ambos sincronizados es lo que evita el error DIAN **FAC025**.
+
+- **NIT con dígito embebido**: en los Excel/PDF el NIT suele venir con el dígito de verificación pegado (ej. `8000213085`). Para separarlo: limpiar a solo dígitos y tomar el último como dígito (`nit = s[:-1]`, `digito = s[-1]`). Así lo hace `excel_loader.py` cuando se mapea la columna NIT.
 
 ---
 
@@ -156,6 +182,8 @@ La app está pensada para distribuirse como `.exe` con PyInstaller `--onefile`. 
 - `resource_path()` usa `sys._MEIPASS` si existe, o el directorio del módulo si no
 - La función sube un nivel (`"..", "icono.ico"`) porque vive en `utils/` pero el recurso está en la raíz
 - No usar `__file__` directamente en módulos UI para rutas de recursos
+- **`main.py` llama `multiprocessing.freeze_support()`** como primera instrucción del `if __name__ == "__main__"`: es **obligatorio** porque `extraer_datos_rg.py` usa `ProcessPoolExecutor`. Sin esto, el `.exe` `--onefile` relanzaría la ventana principal por cada proceso hijo.
+- Los workers de multiprocessing deben ser funciones **a nivel de módulo** (no métodos), para ser picklables en Windows (arranque `spawn`). Por eso `_procesar_pdf_worker` está fuera de la clase.
 
 ---
 
@@ -165,8 +193,8 @@ La app está pensada para distribuirse como `.exe` con PyInstaller `--onefile`. 
 # Desarrollo
 python main.py
 
-# Compilar con PyInstaller
-pyinstaller --onefile --windowed --icon=icono.ico main.py
+# Compilar con PyInstaller (usar el .spec oficial — ya incluye freeze_support, icono y deps)
+pyinstaller FE-Tool.spec
 ```
 
 ## Dependencias principales

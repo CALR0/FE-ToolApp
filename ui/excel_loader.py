@@ -1,3 +1,4 @@
+import re
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from datetime import datetime
@@ -27,6 +28,17 @@ class ExcelLoaderWindow:
       4. Genera todos los XML de una vez
     """
 
+    # Opciones de filtro de generación. Funcionan solo si el Excel cargado trae
+    # las columnas de validación del cruce de remesas.
+    FILTROS_GEN = [
+        "Todas (sin filtro)",
+        "Solo Reconstruir = Sí",
+        "Coinciden remesas, NO coincide valor",
+        "Coincide valor, NO coinciden remesas",
+        "NO coinciden remesas",
+        "NO coincide valor",
+    ]
+
     # Campos requeridos y opcionales para el mapeo
     CAMPOS = [
         # (clave_interna, etiqueta_UI, requerido, default_si_no_mapeado)
@@ -39,6 +51,8 @@ class ExcelLoaderWindow:
         ("col_val_fac",   "Valor total factura ($)",    True,  None),
         ("col_peso",      "Peso KGM",                  False, "1"),
         ("col_desc_lin",  "Descripción línea remesa",  False, "Servicio de transporte"),
+        ("col_nit_cli",   "NIT cliente (opcional)",    False, "Usa 'Datos del Cliente'. El dígito = último número del NIT"),
+        ("col_nom_cli",   "Nombre cliente (opcional)", False, "Usa 'Datos del Cliente'"),
     ]
 
     def __init__(self, parent, perfil_fn, on_success, max_facturas=200):
@@ -64,6 +78,7 @@ class ExcelLoaderWindow:
         self.hojas        = []
         self.df_raw       = None
         self.cols         = ["— No usar —"]
+        self._filtro_gen_var = None
 
         self._build()
 
@@ -140,8 +155,11 @@ class ExcelLoaderWindow:
                     "col_val_fac":  ["valor_factura", "valor fac", "val_fac", "vfac"],
                     "col_peso":     ["peso", "kg", "kgm"],
                     "col_desc_lin": ["descripcion", "desc", "descripcion_linea"],
+                    "col_nit_cli":  ["nit"],
+                    "col_nom_cli":  ["nombre_cliente", "nombre cli", "nom_cli", "cliente"],
                 }
-                if any(h in col_norm for h in hints.get(clave, [])):
+                if any(h in col_norm for h in hints.get(clave, [])) \
+                   and not (clave == "col_nit_cli" and "unitar" in col_norm):
                     var.set(col)
                     matched = True
                     break
@@ -293,8 +311,11 @@ class ExcelLoaderWindow:
                         "col_val_fac":  ["valor_factura", "valor fac", "val_fac", "vfac"],
                         "col_peso":     ["peso", "kg", "kgm"],
                         "col_desc_lin": ["descripcion", "desc", "descripcion_linea"],
+                        "col_nit_cli":  ["nit"],
+                        "col_nom_cli":  ["nombre_cliente", "nombre cli", "nom_cli", "cliente"],
                     }
-                    if any(h in col_norm for h in hints.get(clave, [])):
+                    if any(h in col_norm for h in hints.get(clave, [])) \
+                       and not (clave == "col_nit_cli" and "unitar" in col_norm):
                         var.set(col)
                         break
 
@@ -336,6 +357,19 @@ class ExcelLoaderWindow:
                                        text="  (deja vacío para generar todas)",
                                        font=FONT_SMALL, bg=BG2, fg=TEXT2)
         self._lbl_cant_hint.pack(side=tk.LEFT, padx=(6, 0))
+
+        # ── Filtro de generación (usa columnas del cruce de remesas) ──────────
+        filtro_frame = tk.Frame(body, bg=BG2, padx=12, pady=10)
+        filtro_frame.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(filtro_frame, text="Filtro de generación:",
+                 font=FONT_BODY, bg=BG2, fg=TEXT).pack(side=tk.LEFT, padx=(0, 10))
+        self._filtro_gen_var = tk.StringVar(value=self.FILTROS_GEN[0])
+        ttk.Combobox(filtro_frame, textvariable=self._filtro_gen_var,
+                     values=self.FILTROS_GEN, state="readonly",
+                     font=FONT_BODY, width=38).pack(side=tk.LEFT)
+        tk.Label(filtro_frame,
+                 text="  (requiere Excel del cruce con sus columnas de validación)",
+                 font=FONT_SMALL, bg=BG2, fg=TEXT2).pack(side=tk.LEFT, padx=(6, 0))
 
         btn_row = tk.Frame(body, bg=BG)
         btn_row.pack(fill=tk.X, pady=(4, 0))
@@ -496,6 +530,48 @@ class ExcelLoaderWindow:
             root_frame.winfo_toplevel().geometry(f"{w}x{h}")
             root_frame.winfo_toplevel().minsize(750, 500)
 
+    # ── Filtro por columnas del cruce ─────────────────────────────────────────
+
+    @staticmethod
+    def _es_si(v):
+        """True si el valor de celda representa 'Sí' (tolerante a acento/formato)."""
+        return str(v).strip().lower() in ("sí", "si", "s", "true", "1", "yes")
+
+    @staticmethod
+    def _cols_cruce(df):
+        """
+        Localiza las columnas de validación del cruce en el DataFrame.
+        Retorna dict {rem, val, rec} con los nombres reales, o None si faltan.
+        """
+        if df is None:
+            return None
+        rem = val = rec = None
+        for col in df.columns.astype(str):
+            cn = col.lower()
+            if "coinciden" in cn and "remesa" in cn:
+                rem = col
+            elif "coincide" in cn and "valor" in cn:
+                val = col
+            elif "reconstruir" in cn:
+                rec = col
+        if rem and val and rec:
+            return {"rem": rem, "val": val, "rec": rec}
+        return None
+
+    @classmethod
+    def _pasa_filtro(cls, filtro, rem, val, rec):
+        """True si una fila con esas banderas debe incluirse según el filtro."""
+        r = cls._es_si(rem)
+        v = cls._es_si(val)
+        x = cls._es_si(rec)
+        if filtro == "Todas (sin filtro)":                      return True
+        if filtro == "Solo Reconstruir = Sí":                   return x
+        if filtro == "Coinciden remesas, NO coincide valor":    return r and not v
+        if filtro == "Coincide valor, NO coinciden remesas":    return v and not r
+        if filtro == "NO coinciden remesas":                    return not r
+        if filtro == "NO coincide valor":                       return not v
+        return True
+
     # ── Validación ────────────────────────────────────────────────────────────
 
     def _validar(self):
@@ -505,6 +581,13 @@ class ExcelLoaderWindow:
         for clave, etiqueta, req, _ in self.CAMPOS:
             if req and self.vars[clave].get() == "— No usar —":
                 return False, f"El campo obligatorio '{etiqueta}' no tiene columna asignada."
+        # Si hay un filtro de cruce activo, el Excel debe traer sus columnas
+        filtro = self._filtro_gen_var.get() if self._filtro_gen_var else "Todas (sin filtro)"
+        if filtro != "Todas (sin filtro)" and self._cols_cruce(self.df_raw) is None:
+            return False, ("El filtro seleccionado necesita las columnas de validación del cruce "
+                           "(¿Coinciden remesas?, ¿Coincide valor factura con RG?, Reconstruir). "
+                           "El Excel cargado no las tiene: usa 'Todas (sin filtro)' o carga el "
+                           "Excel generado por el módulo de cruce de remesas.")
         return True, ""
 
     # ── Parseo del DataFrame → lista de datos por factura ────────────────────
@@ -515,6 +598,17 @@ class ExcelLoaderWindow:
         Retorna lista de dicts compatibles con generar_xml().
         """
         df = self.df_raw.copy()
+
+        # Filtrar filas según las columnas de validación del cruce (si aplica)
+        filtro = self._filtro_gen_var.get() if self._filtro_gen_var else "Todas (sin filtro)"
+        if filtro != "Todas (sin filtro)":
+            cc = self._cols_cruce(df)
+            if cc is not None:
+                mask = [
+                    self._pasa_filtro(filtro, r, v, x)
+                    for r, v, x in zip(df[cc["rem"]], df[cc["val"]], df[cc["rec"]])
+                ]
+                df = df[mask]
 
         def col(clave):
             v = self.vars[clave].get()
@@ -529,6 +623,8 @@ class ExcelLoaderWindow:
         c_val_fac  = col("col_val_fac")
         c_peso     = col("col_peso")
         c_desc_lin = col("col_desc_lin")
+        c_nit_cli  = col("col_nit_cli")
+        c_nom_cli  = col("col_nom_cli")
 
         datos_list = []
         grupos = df.groupby(df[c_nf].astype(str))
@@ -581,13 +677,29 @@ class ExcelLoaderWindow:
                     "descripcion_linea": desc_lin,
                 })
 
+            # Datos del cliente: por columna mapeada (opcional) o los valores fijos
+            # de 'Datos del Cliente'. Si se mapea el NIT, el dígito de verificación
+            # se toma del ÚLTIMO dígito del NIT (ej. 8000213085 → NIT 800021308, díg 5).
+            nit_cli = self.xl_ent_nit_cli.get().strip() or "800021308"
+            dig_cli = self.xl_ent_dig_cli.get().strip() or "5"
+            nom_cli = self.xl_ent_nom_cli.get().strip() or "DRUMMOND LTD"
+
+            if c_nit_cli:
+                solo_digitos = re.sub(r"\D", "", str(primera[c_nit_cli]))
+                if len(solo_digitos) >= 2:
+                    nit_cli, dig_cli = solo_digitos[:-1], solo_digitos[-1]
+            if c_nom_cli:
+                v = str(primera[c_nom_cli]).strip()
+                if v and v.lower() not in ("nan", "none", ""):
+                    nom_cli = v
+
             datos_list.append({
                 "numero_factura": nf,
                 "cufe":           cufe,
                 "fecha":          fecha,
-                "nit_cliente":    self.xl_ent_nit_cli.get().strip() or "800021308",
-                "digito_cliente": self.xl_ent_dig_cli.get().strip() or "5",
-                "nombre_cliente": self.xl_ent_nom_cli.get().strip() or "DRUMMOND LTD",
+                "nit_cliente":    nit_cli,
+                "digito_cliente": dig_cli,
+                "nombre_cliente": nom_cli,
                 "valor_total":    val_fac,
                 "remesas":        remesas,
             })
