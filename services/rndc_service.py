@@ -327,40 +327,20 @@ _RNDC_REMESA_SOAP_PATH = "/soap/IBPMServices"
 _RNDC_REMESA_ACTION    = "urn:BPMServicesIntf-IBPMServices#AtenderMensajeRNDC"
 
 
-def corregir_remesa(variables, perfil, timeout=20):
+def _enviar_proceso_rndc(procesoid, variables, perfil, timeout=20):
     """
-    Corrige una remesa en el RNDC usando el proceso 38 (tipo 1 = enviar info).
-
-    No usa el elemento <documento> (eso es solo para consultas). La remesa a
-    corregir se identifica por las variables que envíes (típicamente
-    NUMNITEMPRESATRANSPORTE + consecutivoRemesa, o el INGRESOID/radicado).
+    Envía información a un proceso del RNDC (tipo 1 = registrar/enviar), sin
+    elemento <documento>. Usado por corregir_remesa (38) y anular_cumplido_remesa
+    (28). Endpoint: rndcws (host del WSDL).
 
     Parámetros:
-        variables : dict  — pares {nombre_variable: valor} EXACTAMENTE como el
-                            Diccionario de Datos del proceso 38. El orden del dict
-                            se respeta en el XML (Python 3.7+). Las credenciales NO
-                            van aquí: se toman del perfil.
-        perfil    : dict  — perfil activo (usa rndc_usuario / rndc_password).
-        timeout   : int   — segundos de espera (default 20).
+        procesoid : int|str — número de proceso del RNDC (ej. 38, 28).
+        variables : dict    — {nombre_variable: valor}; el orden se respeta.
+        perfil    : dict    — usa rndc_usuario / rndc_password.
+        timeout   : int     — segundos de espera.
 
     Retorna:
-        (ok: bool, resultado)
-        Si ok=True  → resultado es dict {'ingresoid': str, 'respuesta': str}
-        Si ok=False → resultado es str con el mensaje de error.
-
-    Ejemplo de uso:
-        vars_ = {
-            "NUMNITEMPRESATRANSPORTE": "8190041165",
-            "consecutivoRemesa":       "0101210626",
-            "codOperacionTransporte":  "G",
-            "cantidadCargada":         "10500",
-            "descripcionCortaProducto":"B-100",
-            "MOTIVOCAMBIO":            "1",
-            "CODIGOCAMBIO":            "2",
-            "observaciones":           "B-100.",
-            # ... resto de campos a corregir
-        }
-        ok, res = corregir_remesa(vars_, perfil)
+        (ok, dict {'ingresoid','respuesta'})  o  (False, mensaje_error)
     """
     if not REQUESTS_OK:
         return False, "La librería 'requests' no está instalada."
@@ -373,7 +353,7 @@ def corregir_remesa(variables, perfil, timeout=20):
     if not isinstance(variables, dict) or not variables:
         return False, "Debes pasar un dict de variables no vacío."
 
-    # 1. Construir bloque <variables> respetando el orden del dict
+    # 1. Bloque <variables> respetando el orden del dict
     bloque_vars = "".join(
         f"    <{nombre}>{_html.escape('' if valor is None else str(valor))}</{nombre}>\n"
         for nombre, valor in variables.items()
@@ -388,7 +368,7 @@ def corregir_remesa(variables, perfil, timeout=20):
         "  </acceso>\n"
         "  <solicitud>\n"
         "    <tipo>1</tipo>\n"
-        "    <procesoid>38</procesoid>\n"
+        f"    <procesoid>{procesoid}</procesoid>\n"
         "  </solicitud>\n"
         "  <variables>\n"
         f"{bloque_vars}"
@@ -396,11 +376,9 @@ def corregir_remesa(variables, perfil, timeout=20):
         "</root>"
     )
 
-    # 2. Empaquetar en el sobre SOAP (escapando el XML interno)
     soap_body = _RNDC_CONSULTA_SOAP_ENVELOPE.format(
         rndc_xml_escaped=_html.escape(rndc_xml)
     )
-
     url     = _RNDC_REMESA_ENDPOINT + _RNDC_REMESA_SOAP_PATH
     headers = {
         "Content-Type": "text/xml; charset=UTF-8",
@@ -417,7 +395,7 @@ def corregir_remesa(variables, perfil, timeout=20):
     except Exception as e:
         return False, str(e)[:180]
 
-    # 3. Extraer el XML de respuesta (<return> o <root>)
+    # Extraer XML de respuesta
     inner_raw = None
     m = _re.search(r'<[^>]*:?return[^>]*>(.*?)</[^>]*:?return>',
                    resp.text, _re.DOTALL | _re.IGNORECASE)
@@ -433,7 +411,6 @@ def corregir_remesa(variables, perfil, timeout=20):
 
     inner = _html.unescape(inner_raw)
 
-    # 4. Parsear resultado
     def _parse(texto):
         for intento in (texto, texto.encode("iso-8859-1"),
                         _re.sub(r'<\?xml[^?]*\?>', '', texto, count=1).strip()):
@@ -447,15 +424,46 @@ def corregir_remesa(variables, perfil, timeout=20):
     if root_el is None:
         return False, f"No se pudo parsear la respuesta: {inner[:200]}"
 
-    # Éxito: el RNDC devuelve <ingresoid>
     ing = root_el.find(".//ingresoid")
     if ing is not None and ing.text and ing.text.strip():
         return True, {"ingresoid": ing.text.strip(), "respuesta": inner.strip()}
 
-    # Error reportado por el RNDC
     for tag in (".//ErrorMSG", ".//error"):
         el = root_el.find(tag)
         if el is not None and el.text and el.text.strip():
             return False, el.text.strip()
 
     return False, f"Respuesta sin INGRESOID ni error: {inner.strip()[:200]}"
+
+
+def corregir_remesa(variables, perfil, timeout=20):
+    """
+    Corrige una remesa en el RNDC usando el proceso 38 (tipo 1).
+    `variables` es un dict {nombre: valor} según el Diccionario de Datos del
+    proceso 38 (no incluye credenciales). Retorna (ok, {ingresoid}) o (False, err).
+    """
+    return _enviar_proceso_rndc(38, variables, perfil, timeout)
+
+
+def anular_cumplido_remesa(consecutivo_remesa, cod_motivo, perfil, timeout=20):
+    """
+    Anula el cumplido de una remesa en el RNDC (proceso 28, tipo 1).
+
+    Campos que exige el formulario del RNDC:
+        NUMNITEMPRESATRANSPORTE    (del perfil: nit_socio)
+        CONSECUTIVOREMESA          (consecutivo de la remesa)
+        CODMOTIVOANULACIONCUMPLIDO ('D' = Error Digitación, 'O' = Otro)
+
+    Parámetros:
+        consecutivo_remesa : str
+        cod_motivo         : str  — 'D' o 'O'
+        perfil             : dict — usa rndc_usuario / rndc_password / nit_socio.
+
+    Retorna (ok, {ingresoid}) o (False, mensaje_error).
+    """
+    variables = {
+        "NUMNITEMPRESATRANSPORTE":    perfil.get("nit_socio", ""),
+        "CONSECUTIVOREMESA":          str(consecutivo_remesa).strip(),
+        "CODMOTIVOANULACIONCUMPLIDO": str(cod_motivo).strip(),
+    }
+    return _enviar_proceso_rndc(28, variables, perfil, timeout)

@@ -127,7 +127,7 @@ class CorregirRemesaModule:
 
         hdr = tk.Frame(container, bg=BG2, pady=10)
         hdr.pack(fill=tk.X)
-        tk.Label(hdr, text="🛠  Corregir Remesa (RNDC proceso 38)",
+        tk.Label(hdr, text="🛠  Corregir Remesa",
                  font=FONT_H1, bg=BG2, fg=TEXT).pack(padx=20)
         tk.Label(hdr, text="Consulta una remesa, elige qué corregir y envía la corrección al RNDC.",
                  font=FONT_SMALL, bg=BG2, fg=TEXT2).pack(padx=20)

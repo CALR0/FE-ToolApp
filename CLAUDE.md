@@ -45,7 +45,8 @@ testap/
 │   ├── reconstruir_xml.py         ← ReconstruirXMLModule: aplica transformaciones DIAN a XMLs originales
 │   ├── extraer_datos_rg.py        ← ExtraerDatosRGModule: extrae datos de PDFs de facturas y exporta a Excel
 │   ├── cruzar_remesas.py          ← CruzarRemesasModule: cruza el Excel de "Extraer Datos RG" con otro Excel externo
-│   └── corregir_remesa.py         ← CorregirRemesaModule: consulta y corrige una remesa en el RNDC (proceso 38)
+│   ├── corregir_remesa.py         ← CorregirRemesaModule: consulta y corrige una remesa en el RNDC (proceso 38)
+│   └── anular_cumplido_remesa.py  ← AnularCumplidoRemesaModule: anula el cumplido de una remesa (proceso 28)
 │
 ├── utils/                         ← Utilidades transversales
 │   ├── __init__.py
@@ -78,7 +79,7 @@ Ventana principal. Construye:
 - **Header** con logo FE-Tool
 - **Pill bar** de selección de perfil (ut_tsp / ut_elogia)
 - **Sidebar** con grupos colapsables: Facturación / Remesas / Otros
-- **9 paneles** de contenido (uno por módulo), mostrados/ocultados con `pack/pack_forget`
+- **10 paneles** de contenido (uno por módulo), mostrados/ocultados con `pack/pack_forget`
 - **Barra de estado** inferior
 
 Al cambiar de perfil notifica activamente a `_rndc_uploader`, `_excel_loader` y `_reconstruir_module`.
@@ -164,6 +165,12 @@ Detalles importantes:
 - En el `<documento>` de la consulta los valores van **entre comillas simples** (`'8901031611'`); omitirlas causa `ORA-01722: invalid number`.
 - Respeta `prefijo_remesa` del perfil (antepone `0` al consecutivo en ut_elogia).
 
+### `ui/anular_cumplido_remesa.py` — AnularCumplidoRemesaModule
+Anula el cumplido de una remesa en el RNDC vía **proceso 28** (`tipo=1`). Flujo: escribir consecutivo → **Consultar remesa** (`consultar_remesa_completa`, muestra datos para confirmar) → elegir **Motivo de anulación** → **Guardar anulación** con confirmación. Campos enviados: `NUMNITEMPRESATRANSPORTE`, `CONSECUTIVOREMESA`, `CODMOTIVOANULACIONCUMPLIDO` (`D`=Error Digitación, `O`=Otro). Usa las **mismas credenciales de corrección** (`rndc_usuario_corregir`) y el endpoint `rndcws`, igual que corregir remesa.
+
+### Nota — credenciales de corrección/anulación
+Los perfiles pueden definir `rndc_usuario_corregir` / `rndc_password_corregir`. Los módulos de **corregir** y **anular cumplido** usan un helper `_perfil()` que sustituye las credenciales normales por estas (si existen) **solo en esos módulos**; el resto de la app sigue con `rndc_usuario`/`rndc_password`. Si el perfil no las define, hace fallback a las normales. Actualmente `ut_tsp` las tiene (`CG_TSP@137`).
+
 ---
 
 ## Perfiles — config/perfiles.py
@@ -191,6 +198,8 @@ Cada perfil tiene:
 | `consultar_radicado_remesa(consecutivo, perfil)` | `services/rndc_service.py` | Retorna `(ok: bool, resultado: dict)` con `radicado`, `peso`, `estado`, `propietario`, `origen`, `destino`, `manifiesto` (`nummanifiestocarga`) |
 | `consultar_remesa_completa(consecutivo, perfil)` | `services/rndc_service.py` | Proceso 3 / `tipo=3` / `variables=*`. Retorna `(ok, dict)` con TODOS los campos de la remesa |
 | `corregir_remesa(variables, perfil)` | `services/rndc_service.py` | Proceso 38 / `tipo=1`. Envía a `rndcws.mintransporte.gov.co:8080` (sin "2"). `variables` es dict (orden respetado). Retorna `(ok, {ingresoid})` |
+| `anular_cumplido_remesa(consecutivo, cod_motivo, perfil)` | `services/rndc_service.py` | Proceso 28 / `tipo=1`. Anula cumplido. `cod_motivo`: `D`=Error Digitación, `O`=Otro. Mismo endpoint que corregir |
+| `_enviar_proceso_rndc(procesoid, variables, perfil)` | `services/rndc_service.py` | Envío genérico tipo=1 a `rndcws` (usado por corregir 38 y anular 28) |
 | `resource_path(relative)` | `utils/helpers.py` | Resuelve rutas para PyInstaller: sube un nivel desde `utils/` para encontrar archivos en la raíz |
 
 ---
