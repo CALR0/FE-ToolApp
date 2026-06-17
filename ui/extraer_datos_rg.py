@@ -10,6 +10,26 @@ from config.theme import (
 from core.xml_generator import _parse_valor
 
 
+def _procesar_pdf_worker(ruta_str, usar_ref):
+    """
+    Worker ejecutado en un proceso aparte por ProcessPoolExecutor.
+    Debe estar a nivel de módulo (no como método) para ser picklable en
+    Windows, que usa el método de arranque 'spawn'.
+
+    Retorna una tupla compacta y picklable:
+        (numero_factura, fecha_generacion, n_lineas, total_factura, filas)
+    """
+    datos = ExtraerDatosRGModule._extraer_pdf(ruta_str)
+    filas = ExtraerDatosRGModule._expandir_lineas(datos, usar_ref_como_consec=usar_ref)
+    return (
+        datos["numero_factura"],
+        datos["fecha_generacion"],
+        len(datos["lineas"]),
+        datos["total_factura"],
+        filas,
+    )
+
+
 class ExtraerDatosRGModule:
     """
     Panel embebido que carga uno o varios PDFs de facturas electrónicas,
@@ -180,7 +200,29 @@ class ExtraerDatosRGModule:
         m = re.search(r"CUFE[:\s]*([a-f0-9]{80,})", texto, re.IGNORECASE)
         cufe = m.group(1).strip() if m else ""
 
-        m = re.search(r"TOTAL\s*A\s*PAGAR\s+([\d.,]+)", texto, re.IGNORECASE)
+        # NIT del cliente/adquirente: el que aparece tras "CLIENTE :" (Drummond).
+        # Se evita el NIT del emisor (la UT, 901101271). Fallback: NIT tras "NOMBRE:".
+        m = re.search(r"CLIENTE\s*:.*?NIT:\s*([\d.\-]+)", texto, re.IGNORECASE | re.DOTALL)
+        if not m:
+            m = re.search(r"NOMBRE:.*?NIT:\s*([\d.\-]+)", texto, re.IGNORECASE | re.DOTALL)
+        nit_cliente = m.group(1).strip() if m else ""
+
+        # Nombre del cliente/adquirente: el que aparece tras "CLIENTE :".
+        # Fallback: el que aparece tras "NOMBRE:".
+        m = re.search(r"CLIENTE\s*:\s*(.+)", texto, re.IGNORECASE)
+        if not m:
+            m = re.search(r"NOMBRE:\s*(.+)", texto, re.IGNORECASE)
+        nombre_cliente = ""
+        if m:
+            # Cortar en etiquetas que a veces vienen en la misma línea (ej. "ORDEN DE COMPRA:")
+            nombre_cliente = re.split(r"\s{2,}|ORDEN\s+DE\s+COMPRA|NIT:", m.group(1),
+                                      maxsplit=1, flags=re.IGNORECASE)[0].strip()
+
+        # El valor total de la factura es el SUBTOTAL (antes de retenciones),
+        # no el "TOTAL A PAGAR" (que ya tiene descontada la retención).
+        m = re.search(r"SUBTOTAL\s+([\d.,]+)", texto, re.IGNORECASE)
+        if not m:
+            m = re.search(r"TOTAL\s*A\s*PAGAR\s+([\d.,]+)", texto, re.IGNORECASE)
         total_raw = m.group(1).strip() if m else "0"
         try:
             total_factura = _parse_valor(total_raw)
@@ -199,12 +241,14 @@ class ExtraerDatosRGModule:
                 linea = linea.strip()
                 if not linea:
                     continue
+                # CANTIDAD se captura como [\d.,]+ porque puede venir como conteo
+                # entero ("20") o como peso con separadores ("12,350" = 12.35).
                 m_lin = re.match(
-                    r"(\S+)\s+(.+?)\s+(\d+)\s+\S+\s+([\d.,]+)\s+([\d.,]+)\s*$",
+                    r"(\S+)\s+(.+?)\s+([\d.,]+)\s+\S+\s+([\d.,]+)\s+([\d.,]+)\s*$",
                     linea)
                 if not m_lin:
                     m_lin = re.match(
-                        r"(\S+)\s+(.+?)\s+(\d+)\s+([\d.,]+)\s+([\d.,]+)\s*$",
+                        r"(\S+)\s+(.+?)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$",
                         linea)
                     if not m_lin:
                         continue
@@ -213,8 +257,9 @@ class ExtraerDatosRGModule:
                     ref, desc, cant_s, vru_s, vrt_s = m_lin.group(1,2,3,4,5)
 
                 try:
-                    cantidad    = int(cant_s)
+                    cantidad    = _parse_valor(cant_s)
                     vr_unitario = _parse_valor(vru_s)
+                    vr_total    = _parse_valor(vrt_s)
                 except Exception:
                     continue
 
@@ -223,14 +268,23 @@ class ExtraerDatosRGModule:
                     "descripcion": desc.strip(),
                     "cantidad":    cantidad,
                     "vr_unitario": vr_unitario,
+                    "vr_total":    vr_total,
                 })
         return {
             "numero_factura":   numero_factura,
             "fecha_generacion": fecha_generacion,
             "cufe":             cufe,
+            "nit_cliente":      nit_cliente,
+            "nombre_cliente":   nombre_cliente,
             "total_factura":    total_factura,
             "lineas":           lineas,
         }
+
+    # Tope de cantidad para expansión: una línea solo se interpreta como "varias
+    # remesas" si su CANTIDAD es un entero entre 1 y este tope. Si es decimal
+    # (ej. "12,350" = 12.35 → un peso) o un entero mayor al tope, se trata como
+    # una única remesa cuyo valor es el VR.TOTAL de la línea.
+    MAX_CANTIDAD_EXPANSION = 100
 
     @staticmethod
     def _expandir_lineas(datos, usar_ref_como_consec=False):
@@ -238,20 +292,43 @@ class ExtraerDatosRGModule:
         for lin in datos["lineas"]:
             cant         = lin["cantidad"]
             vr_unit_orig = lin["vr_unitario"]
-            vr_unit_ind  = round(vr_unit_orig / cant, 2) if cant > 1 else vr_unit_orig
+            vr_total_lin = lin.get("vr_total", vr_unit_orig)
             consec       = lin["referencia"] if usar_ref_como_consec else ""
-            for _ in range(cant):
+
+            # ¿Es un conteo de remesas (entero pequeño) o un peso (decimal/grande)?
+            es_entero = abs(cant - round(cant)) < 1e-9
+            es_conteo = es_entero and (1 <= cant <= ExtraerDatosRGModule.MAX_CANTIDAD_EXPANSION)
+
+            if es_conteo:
+                n_remesas   = int(round(cant))
+                # Reparte el VR.TOTAL de la línea entre las remesas del conteo
+                vr_unit_ind = round(vr_total_lin / n_remesas, 2) if n_remesas > 1 else vr_total_lin
+            else:
+                # Peso decimal o cantidad muy grande → una sola remesa con el total de la línea
+                n_remesas   = 1
+                vr_unit_ind = vr_total_lin
+
+            for _ in range(n_remesas):
                 filas.append({
                     "numero_factura":      datos["numero_factura"],
                     "fecha_generacion":    datos["fecha_generacion"],
                     "cufe":                datos["cufe"],
+                    "nit":                 datos.get("nit_cliente", ""),
+                    "nombre_cliente":      datos.get("nombre_cliente", ""),
                     "descripcion":         lin["descripcion"],
                     "consecutivo_remesa":  consec,
                     "radicado":            "",
                     "valor_unitario":      vr_unit_ind,
                     "valor_total_factura": datos["total_factura"],
-                    "cantidad_remesas_rg": cant,
+                    "cantidad_remesas_rg": n_remesas,
                 })
+
+        # cantidad_remesas_rg debe reflejar el TOTAL de remesas de la factura
+        # (no el conteo por línea). Como cada PDF es una sola factura, el total
+        # es el número de filas generadas. Ej: 4 líneas → 4,4,4,4.
+        total_remesas = len(filas)
+        for f in filas:
+            f["cantidad_remesas_rg"] = total_remesas
         return filas
 
     def _extraer(self):
@@ -259,41 +336,72 @@ class ExtraerDatosRGModule:
             messagebox.showwarning("Sin archivos", "Carga primero al menos un PDF.")
             return
 
+        import os
+        import concurrent.futures
+
         self._filas_resultado = []
         total = len(self.archivos)
         self._prog_var.set(0)
         self._pb["maximum"] = total
+        usar_ref = self._var_usar_ref.get()
 
-        for idx, ruta in enumerate(self.archivos):
-            self._lbl_prog.configure(text=f"Procesando {idx+1}/{total}: {ruta.name}", fg=TEXT2)
+        # Marcar todas las filas como "en cola"
+        for idx in range(total):
             if self._tree.exists(str(idx)):
                 vals = self._tree.item(str(idx), "values")
                 self._tree.item(str(idx),
-                    values=(vals[0], "", "", "", "", "⏳ Procesando…"),
+                    values=(vals[0], "", "", "", "", "⏳ En cola…"),
                     tags=("proc",))
-            self.win.update_idletasks()
+        self._lbl_prog.configure(text=f"Procesando {total} PDF(s) en paralelo…", fg=TEXT2)
+        self.win.update_idletasks()
 
-            try:
-                datos = self._extraer_pdf(ruta)
-                filas = self._expandir_lineas(datos, usar_ref_como_consec=self._var_usar_ref.get())
-                self._filas_resultado.extend(filas)
+        # Nº de procesos: tantos como núcleos, con tope de 8 para no saturar la RAM
+        max_workers = min(os.cpu_count() or 4, 8)
 
-                nf      = datos["numero_factura"]
-                fecha   = datos["fecha_generacion"]
-                nlin    = len(datos["lineas"])
-                total_f = f"$ {datos['total_factura']:,.0f}".replace(",",".")
-                if self._tree.exists(str(idx)):
-                    self._tree.item(str(idx),
-                        values=(ruta.name, nf, fecha, nlin, total_f, "✓ Extraído"),
-                        tags=("ok",))
-            except Exception as ex:
-                if self._tree.exists(str(idx)):
-                    self._tree.item(str(idx),
-                        values=(ruta.name, "", "", "", "", f"✗ {str(ex)[:80]}"),
-                        tags=("err",))
+        # Los resultados llegan desordenados; se guardan por índice para luego
+        # ensamblar _filas_resultado en el orden original de los archivos.
+        filas_por_idx = {}
+        completados   = 0
 
-            self._prog_var.set(idx + 1)
-            self.win.update_idletasks()
+        try:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+                future_to_idx = {
+                    executor.submit(_procesar_pdf_worker, str(ruta), usar_ref): (idx, ruta)
+                    for idx, ruta in enumerate(self.archivos)
+                }
+
+                for future in concurrent.futures.as_completed(future_to_idx):
+                    idx, ruta = future_to_idx[future]
+                    try:
+                        nf, fecha, nlin, total_factura, filas = future.result()
+                        filas_por_idx[idx] = filas
+                        total_f = f"$ {total_factura:,.0f}".replace(",", ".")
+                        if self._tree.exists(str(idx)):
+                            self._tree.item(str(idx),
+                                values=(ruta.name, nf, fecha, nlin, total_f, "✓ Extraído"),
+                                tags=("ok",))
+                    except Exception as ex:
+                        if self._tree.exists(str(idx)):
+                            self._tree.item(str(idx),
+                                values=(ruta.name, "", "", "", "", f"✗ {str(ex)[:80]}"),
+                                tags=("err",))
+
+                    completados += 1
+                    self._prog_var.set(completados)
+                    # Refrescar la UI cada 5 archivos (y al final) para no frenar
+                    if completados % 5 == 0 or completados == total:
+                        self._lbl_prog.configure(
+                            text=f"Procesando {completados}/{total}…", fg=TEXT2)
+                        self.win.update_idletasks()
+        except Exception as ex:
+            messagebox.showerror("Error de procesamiento",
+                f"Falló el procesamiento en paralelo:\n{ex}")
+            return
+
+        # Ensamblar en el orden original de los archivos
+        for idx in range(total):
+            if idx in filas_por_idx:
+                self._filas_resultado.extend(filas_por_idx[idx])
 
         self._lbl_prog.configure(
             text=f"✓ {len(self._filas_resultado)} fila(s) extraídas de {total} PDF(s).",
@@ -315,7 +423,7 @@ class ExtraerDatosRGModule:
         try:
             import pandas as pd
             df = pd.DataFrame(self._filas_resultado, columns=[
-                "numero_factura", "fecha_generacion", "cufe",
+                "numero_factura", "fecha_generacion", "cufe", "nit", "nombre_cliente",
                 "descripcion", "consecutivo_remesa", "radicado",
                 "valor_unitario", "valor_total_factura", "cantidad_remesas_rg",
             ])

@@ -1,3 +1,4 @@
+import re
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 try:
@@ -234,6 +235,18 @@ class CruzarRemesasModule:
             if not matched:
                 var.set("— No usar —")
 
+    @staticmethod
+    def _to_num(v):
+        """
+        Convierte un valor de celda a float de forma robusta. Acepta números
+        puros, celdas con formato moneda de Excel (que pandas ya lee como número)
+        y texto con símbolos de moneda o separadores ($, espacios, puntos, comas).
+        """
+        s = str(v).strip()
+        # Quitar todo lo que no sea dígito, punto, coma o signo negativo
+        s = re.sub(r"[^\d.,\-]", "", s)
+        return _parse_valor(s)
+
     # ── Validación y cruce ───────────────────────────────────────────────────
 
     def _validar(self):
@@ -273,7 +286,7 @@ class CruzarRemesasModule:
                 g_rg = grupos_rg.get_group(nf)
                 n_remesas_rg = len(g_rg)
                 try:
-                    valor_factura_rg = _parse_valor(str(g_rg[c["rg_col_val_fac"]].iloc[0]))
+                    valor_factura_rg = self._to_num(g_rg[c["rg_col_val_fac"]].iloc[0])
                 except Exception:
                     valor_factura_rg = 0.0
             else:
@@ -286,7 +299,7 @@ class CruzarRemesasModule:
                 suma_valor_otro = 0.0
                 for v in g_otro[c["otro_col_val_un"]]:
                     try:
-                        suma_valor_otro += _parse_valor(str(v))
+                        suma_valor_otro += self._to_num(v)
                     except Exception:
                         pass
                 # Consecutivos en el orden en que aparecen en el otro Excel,
