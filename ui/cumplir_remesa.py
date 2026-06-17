@@ -29,10 +29,23 @@ class CumplirRemesaModule:
         "S — Suspensión",
     ]
 
+    # Etapas de tiempos: (etiqueta, campo_fecha, campo_hora)
+    CARGUE_ROWS = [
+        ("Llegada", "FECHALLEGADACARGUE", "HORALLEGADACARGUEREMESA"),
+        ("Entrada", "FECHAENTRADACARGUE", "HORAENTRADACARGUEREMESA"),
+        ("Salida",  "FECHASALIDACARGUE",  "HORASALIDACARGUEREMESA"),
+    ]
+    DESCARGUE_ROWS = [
+        ("Llegada", "FECHALLEGADADESCARGUE", "HORALLEGADADESCARGUECUMPLIDO"),
+        ("Entrada", "FECHAENTRADADESCARGUE", "HORAENTRADADESCARGUECUMPLIDO"),
+        ("Salida",  "FECHASALIDADESCARGUE",  "HORASALIDADESCARGUECUMPLIDO"),
+    ]
+
     def __init__(self, perfil_fn=None):
         self.perfil_fn = perfil_fn
         self._consulta = {}
         self._consultada = False
+        self.time_vars = {}   # nombre_campo → StringVar (tiempos editables)
 
     # ── Credenciales de corrección (igual que corregir/anular) ────────────────
 
@@ -111,17 +124,25 @@ class CumplirRemesaModule:
         cmb = ttk.Combobox(sel, textvariable=self.var_tipo, values=self.TIPOS,
                            state="readonly", font=FONT_BODY, width=24)
         cmb.pack(side=tk.LEFT)
-        cmb.bind("<<ComboboxSelected>>", lambda e: self._recalcular())
+        cmb.bind("<<ComboboxSelected>>", lambda e: self._render_campos())
 
-        # ── Vista previa (solo lectura) ───────────────────────────────────────
+        # StringVars de los tiempos (editables)
+        for _etq, fcampo, hcampo in self.CARGUE_ROWS + self.DESCARGUE_ROWS:
+            self.time_vars[fcampo] = tk.StringVar()
+            self.time_vars[hcampo] = tk.StringVar()
+
+        # Info de cantidades (solo lectura, automático)
+        self._lbl_cant = tk.Label(body, text="", font=FONT_SMALL, bg=BG, fg=TEXT2, anchor="w")
+        self._lbl_cant.pack(anchor="w", pady=(0, 4))
+
+        # ── Tiempos logísticos (auto-calculados, editables) ───────────────────
         card = tk.Frame(body, bg=BG2)
         card.pack(fill=tk.X, pady=(0, 10))
-        tk.Label(card, text="📋  Cumplido a registrar (automático)",
+        tk.Label(card, text="🕒  Tiempos logísticos (automáticos, editables si tienes los datos)",
                  font=FONT_H2, bg=BG2, fg=TEXT).pack(anchor="w", padx=12, pady=(10, 4))
         tk.Frame(card, bg=BORDER, height=1).pack(fill=tk.X, padx=12, pady=(0, 6))
-        self._prev = tk.Frame(card, bg=BG2)
-        self._prev.pack(fill=tk.X, padx=12, pady=(0, 12))
-        self._prev_labels = {}
+        self._form = tk.Frame(card, bg=BG2)
+        self._form.pack(fill=tk.X, padx=12, pady=(0, 12))
 
         # ── Enviar ────────────────────────────────────────────────────────────
         pie = tk.Frame(body, bg=BG)
@@ -137,87 +158,107 @@ class CumplirRemesaModule:
     def _tipo_codigo(self):
         return self.var_tipo.get().strip().split(" ")[0]   # "C — ..." → "C"
 
-    def _construir_variables(self):
-        """Construye el dict de variables del proceso 5 a partir de la consulta
-        y el tipo de cumplido. Devuelve (variables, errores)."""
+    def _autocalcular(self):
+        """Rellena las StringVars de tiempos con los valores automáticos a partir
+        de las citas pactadas de la consulta (cargue y descargue). El usuario
+        puede luego editarlos. Se ejecuta al consultar."""
         c = self._consulta
-        tipo = self._tipo_codigo()
-        consec = self._consec_efectivo()
-        perfil = self._perfil()
-
-        cantidad = c.get("cantidadcargada", "") or c.get("cantidadinformacioncarga", "")
         f_carg = c.get("fechacitapactadacargue", "")
         h_carg = c.get("horacitapactadacargue", "")
         f_desc = c.get("fechacitapactadadescargue", "")
         h_desc = c.get("horacitapactadadescargueremesa", "")
 
-        errores = []
-        if not f_carg or not h_carg:
-            errores.append("La remesa no tiene fecha/hora de cita de CARGUE.")
+        for n, (_etq, fcampo, hcampo) in enumerate(self.CARGUE_ROWS, start=1):
+            fe, ho = self._fecha_hora_mas(f_carg, h_carg, n)
+            self.time_vars[fcampo].set(fe)
+            self.time_vars[hcampo].set(ho)
+        for n, (_etq, fcampo, hcampo) in enumerate(self.DESCARGUE_ROWS, start=1):
+            fe, ho = self._fecha_hora_mas(f_desc, h_desc, n)
+            self.time_vars[fcampo].set(fe)
+            self.time_vars[hcampo].set(ho)
 
-        # Cargue: llegada (+1h), entrada (+2h), salida (+3h), con avance de día
-        cll_f, cll_h = self._fecha_hora_mas(f_carg, h_carg, 1)
-        cen_f, cen_h = self._fecha_hora_mas(f_carg, h_carg, 2)
-        csa_f, csa_h = self._fecha_hora_mas(f_carg, h_carg, 3)
+        cant = c.get("cantidadcargada", "") or c.get("cantidadinformacioncarga", "")
+        self._lbl_cant.configure(
+            text=f"Cantidad cargada: {cant or '—'}  ·  entregada: "
+                 f"{cant if self._tipo_codigo() == 'C' else '0'} (automático)")
+
+    def _render_campos(self):
+        """Dibuja el formulario editable de tiempos según el tipo de cumplido:
+        cargue siempre; descargue solo en Cumplido Normal."""
+        for w in self._form.winfo_children():
+            w.destroy()
+        if not self._consultada:
+            return
+
+        # Actualizar etiqueta de cantidad según tipo (entregada = 0 en suspensión)
+        cant = self._consulta.get("cantidadcargada", "") or \
+               self._consulta.get("cantidadinformacioncarga", "")
+        self._lbl_cant.configure(
+            text=f"Cantidad cargada: {cant or '—'}  ·  entregada: "
+                 f"{cant if self._tipo_codigo() == 'C' else '0'} (automático)")
+
+        def _seccion(titulo, rows, fila0):
+            tk.Label(self._form, text=titulo, font=FONT_BODY, bg=BG2, fg=ACCENT,
+                     anchor="w").grid(row=fila0, column=0, columnspan=4, sticky="w", pady=(6, 2))
+            for i, (etq, fcampo, hcampo) in enumerate(rows):
+                r = fila0 + 1 + i
+                tk.Label(self._form, text=etq, font=FONT_SMALL, bg=BG2, fg=TEXT2,
+                         width=10, anchor="w").grid(row=r, column=0, sticky="w", padx=(4, 6), pady=3)
+                tk.Label(self._form, text="Fecha", font=FONT_SMALL, bg=BG2, fg=TEXT2
+                         ).grid(row=r, column=1, sticky="e", padx=(0, 4))
+                tk.Entry(self._form, textvariable=self.time_vars[fcampo], font=FONT_BODY, width=14,
+                         bg=BG3, fg=TEXT, insertbackground=TEXT, relief="flat",
+                         highlightthickness=1, highlightbackground=BORDER,
+                         highlightcolor=ACCENT).grid(row=r, column=2, sticky="w", padx=(0, 14), pady=3)
+                tk.Label(self._form, text="Hora", font=FONT_SMALL, bg=BG2, fg=TEXT2
+                         ).grid(row=r, column=3, sticky="e", padx=(0, 4))
+                tk.Entry(self._form, textvariable=self.time_vars[hcampo], font=FONT_BODY, width=8,
+                         bg=BG3, fg=TEXT, insertbackground=TEXT, relief="flat",
+                         highlightthickness=1, highlightbackground=BORDER,
+                         highlightcolor=ACCENT).grid(row=r, column=4, sticky="w", padx=(0, 14), pady=3)
+
+        _seccion("Cargue (origen)", self.CARGUE_ROWS, 0)
+        if self._tipo_codigo() == "C":
+            _seccion("Descargue (destino)", self.DESCARGUE_ROWS, len(self.CARGUE_ROWS) + 2)
+
+    def _construir_variables(self):
+        """Construye el dict de variables del proceso 5 leyendo los tiempos de los
+        campos editables (ya auto-rellenados). Devuelve (variables, errores)."""
+        c = self._consulta
+        tipo = self._tipo_codigo()
+        perfil = self._perfil()
+        cantidad = c.get("cantidadcargada", "") or c.get("cantidadinformacioncarga", "")
 
         variables = {
             "NUMNITEMPRESATRANSPORTE":  perfil.get("nit_socio", ""),
-            "CONSECUTIVOREMESA":        consec,
+            "CONSECUTIVOREMESA":        self._consec_efectivo(),
             "TIPOCUMPLIDOREMESA":       tipo,
             "CANTIDADINFORMACIONCARGA": cantidad,
             "CANTIDADENTREGADA":        cantidad if tipo == "C" else "0",
-            # Tiempos de cargue (siempre)
-            "FECHALLEGADACARGUE":       cll_f,
-            "HORALLEGADACARGUEREMESA":  cll_h,
-            "FECHAENTRADACARGUE":       cen_f,
-            "HORAENTRADACARGUEREMESA":  cen_h,
-            "FECHASALIDACARGUE":        csa_f,
-            "HORASALIDACARGUEREMESA":   csa_h,
         }
 
+        errores = []
+        # Cargue (siempre)
+        for etq, fcampo, hcampo in self.CARGUE_ROWS:
+            fe = self.time_vars[fcampo].get().strip()
+            ho = self.time_vars[hcampo].get().strip()
+            variables[fcampo] = fe
+            variables[hcampo] = ho
+            if not fe or not ho:
+                errores.append(f"Falta fecha/hora de {etq} (cargue).")
+
         if tipo == "C":
-            # Cumplido normal → también descargue
-            if not f_desc or not h_desc:
-                errores.append("La remesa no tiene fecha/hora de cita de DESCARGUE.")
-            dll_f, dll_h = self._fecha_hora_mas(f_desc, h_desc, 1)
-            den_f, den_h = self._fecha_hora_mas(f_desc, h_desc, 2)
-            dsa_f, dsa_h = self._fecha_hora_mas(f_desc, h_desc, 3)
-            variables.update({
-                "FECHALLEGADADESCARGUE":        dll_f,
-                "HORALLEGADADESCARGUECUMPLIDO": dll_h,
-                "FECHAENTRADADESCARGUE":        den_f,
-                "HORAENTRADADESCARGUECUMPLIDO": den_h,
-                "FECHASALIDADESCARGUE":         dsa_f,
-                "HORASALIDADESCARGUECUMPLIDO":  dsa_h,
-            })
+            for etq, fcampo, hcampo in self.DESCARGUE_ROWS:
+                fe = self.time_vars[fcampo].get().strip()
+                ho = self.time_vars[hcampo].get().strip()
+                variables[fcampo] = fe
+                variables[hcampo] = ho
+                if not fe or not ho:
+                    errores.append(f"Falta fecha/hora de {etq} (descargue).")
         else:
-            # Suspensión → motivo "Otro", sin descargue
             variables["MOTIVOSUSPENSIONREMESA"] = "O"
 
         return variables, errores
-
-    def _recalcular(self):
-        """Refresca la vista previa con las variables que se enviarían."""
-        for w in self._prev.winfo_children():
-            w.destroy()
-        self._prev_labels = {}
-        if not self._consultada:
-            return
-        variables, errores = self._construir_variables()
-        # No mostrar el identificador/credenciales, solo lo relevante
-        ocultar = {"NUMNITEMPRESATRANSPORTE"}
-        items = [(k, v) for k, v in variables.items() if k not in ocultar]
-        for i, (k, v) in enumerate(items):
-            r = i // 2
-            cc = (i % 2) * 2
-            tk.Label(self._prev, text=k + ":", font=FONT_SMALL, bg=BG2, fg=TEXT2,
-                     anchor="w").grid(row=r, column=cc, sticky="w", padx=(4, 6), pady=2)
-            tk.Label(self._prev, text=v or "—", font=FONT_BODY, bg=BG2, fg=TEXT,
-                     anchor="w").grid(row=r, column=cc+1, sticky="w", padx=(0, 18), pady=2)
-        if errores:
-            tk.Label(self._prev, text="⚠ " + "  ".join(errores), font=FONT_SMALL,
-                     bg=BG2, fg=DANGER, anchor="w").grid(
-                     row=(len(items)+1)//2 + 1, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
     # ── Consultar ─────────────────────────────────────────────────────────────
 
@@ -242,7 +283,6 @@ class CumplirRemesaModule:
             self._consultada = False
             self._btn_enviar.configure(bg=BG3, fg=TEXT2)
             self._lbl_estado.configure(text=f"✗ {res}", fg=DANGER)
-            self._recalcular()
             return
 
         self._consulta = res
@@ -250,8 +290,9 @@ class CumplirRemesaModule:
         self._btn_enviar.configure(bg=SUCCESS, fg="white")
         self._lbl_estado.configure(
             text=f"✓ Remesa {consec} cargada (cita cargue {res.get('fechacitapactadacargue','?')} "
-                 f"{res.get('horacitapactadacargue','')}). Revisa y guarda el cumplido.", fg=SUCCESS)
-        self._recalcular()
+                 f"{res.get('horacitapactadacargue','')}). Revisa/edita y guarda el cumplido.", fg=SUCCESS)
+        self._autocalcular()
+        self._render_campos()
 
     # ── Enviar ────────────────────────────────────────────────────────────────
 

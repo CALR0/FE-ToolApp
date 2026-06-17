@@ -170,7 +170,7 @@ Detalles importantes:
 Anula el cumplido de una remesa en el RNDC vía **proceso 28** (`tipo=1`). Flujo: escribir consecutivo → **Consultar remesa** (`consultar_remesa_completa`, muestra datos para confirmar) → elegir **Motivo de anulación** → **Guardar anulación** con confirmación. Campos enviados: `NUMNITEMPRESATRANSPORTE`, `CONSECUTIVOREMESA`, `CODMOTIVOANULACIONCUMPLIDO` (`D`=Error Digitación, `O`=Otro). Usa las **mismas credenciales de corrección** (`rndc_usuario_corregir`) y el endpoint `rndcws`, igual que corregir remesa.
 
 ### `ui/cumplir_remesa.py` — CumplirRemesaModule
-Cumple una remesa en el RNDC vía **proceso 5** (`tipo=1`). Casi totalmente automático: consultar → elegir **Tipo de Cumplido** → vista previa → guardar (con confirmación). Todo se calcula de la consulta:
+Cumple una remesa en el RNDC vía **proceso 5** (`tipo=1`). Consultar → elegir **Tipo de Cumplido** → los tiempos se **auto-calculan** y quedan en campos **editables** (por si el usuario tiene los datos reales) → guardar (con confirmación). Cantidades siempre automáticas. Todo se calcula de la consulta:
 - **Cantidades**: `CANTIDADENTREGADA` = `CANTIDADCARGADA` (Normal `C`) o `0` (Suspensión `S`).
 - **Tiempos logísticos**: por etapa, se parte de la cita pactada (fecha+hora) y se suma +1h (llegada), +2h (entrada), +3h (salida) → ~2h de operación. Helper `_fecha_hora_mas` usa aritmética real de `datetime`: si la hora pasa de medianoche, **avanza el día** (ej. `31/12 23:30 +3 → 01/01 02:30`), por eso cada campo lleva su propia fecha+hora.
 - **Normal (`C`)**: llena cargue **y** descargue (campos `...CARGUE...` y `...DESCARGUE...`).
