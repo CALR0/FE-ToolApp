@@ -36,6 +36,19 @@ class CruzarRemesasModule:
         ("otro_col_val_un", "Valor unitario remesa", True),
     ]
 
+    # Opciones de filtro para la exportación. El valor es una función que recibe
+    # las 3 banderas por factura (remesas, valor, reconstruir) y devuelve True
+    # si esa factura debe incluirse en el Excel exportado.
+    FILTROS_EXPORT = [
+        "Todas",
+        "Solo Reconstruir = Sí",
+        "Coinciden remesas, NO coincide valor",
+        "Coincide valor, NO coinciden remesas",
+        "NO coinciden remesas",
+        "NO coincide valor",
+        "Reconstruir = No (alguna no coincide)",
+    ]
+
     HINTS = {
         "rg_col_nf":       ["factura", "nfactura", "num_fac", "n_factura", "numero_factura"],
         "rg_col_val_fac":  ["valor_total_factura", "valor_factura", "val_fac", "total_factura"],
@@ -51,6 +64,12 @@ class CruzarRemesasModule:
         self.cols_otro = ["— No usar —"]
         self.vars = {}
         self.combos = {}
+        # ExcelFile, selector de hoja y nombre de archivo por fuente ("rg"/"otro")
+        self._xl_files   = {"rg": None, "otro": None}
+        self._hoja_vars  = {}
+        self._hoja_combos = {}
+        self._nombre_archivo = {"rg": "", "otro": ""}
+        self._filtro_var = None
         self._filas_resultado = []
         self._mapa_resultado = {}
         self._col_rg_nf = None
@@ -90,6 +109,15 @@ class CruzarRemesasModule:
                           cursor="hand2", padx=12, pady=5)
         btn_rg.pack(side=tk.LEFT, padx=(0, 10))
         btn_rg.bind("<Button-1>", lambda e: self._cargar_archivo("rg"))
+        tk.Label(fila_rg, text="Hoja:", font=FONT_BODY, bg=BG2, fg=TEXT2
+                 ).pack(side=tk.LEFT, padx=(0, 4))
+        self._hoja_vars["rg"] = tk.StringVar(value="")
+        self._hoja_combos["rg"] = ttk.Combobox(
+            fila_rg, textvariable=self._hoja_vars["rg"], values=[],
+            state="disabled", font=FONT_BODY, width=22)
+        self._hoja_combos["rg"].pack(side=tk.LEFT, padx=(0, 10))
+        self._hoja_combos["rg"].bind(
+            "<<ComboboxSelected>>", lambda e: self._on_hoja_change("rg"))
         self._lbl_rg = tk.Label(fila_rg, text="Sin archivo cargado.",
                                 font=FONT_BODY, bg=BG2, fg=TEXT2, anchor="w")
         self._lbl_rg.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -101,6 +129,15 @@ class CruzarRemesasModule:
                             cursor="hand2", padx=12, pady=5)
         btn_otro.pack(side=tk.LEFT, padx=(0, 10))
         btn_otro.bind("<Button-1>", lambda e: self._cargar_archivo("otro"))
+        tk.Label(fila_otro, text="Hoja:", font=FONT_BODY, bg=BG2, fg=TEXT2
+                 ).pack(side=tk.LEFT, padx=(0, 4))
+        self._hoja_vars["otro"] = tk.StringVar(value="")
+        self._hoja_combos["otro"] = ttk.Combobox(
+            fila_otro, textvariable=self._hoja_vars["otro"], values=[],
+            state="disabled", font=FONT_BODY, width=22)
+        self._hoja_combos["otro"].pack(side=tk.LEFT, padx=(0, 10))
+        self._hoja_combos["otro"].bind(
+            "<<ComboboxSelected>>", lambda e: self._on_hoja_change("otro"))
         self._lbl_otro = tk.Label(fila_otro, text="Sin archivo cargado.",
                                   font=FONT_BODY, bg=BG2, fg=TEXT2, anchor="w")
         self._lbl_otro.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -127,6 +164,13 @@ class CruzarRemesasModule:
                                     cursor="hand2", padx=14, pady=6)
         self._btn_cruzar.pack(side=tk.LEFT, padx=(0, 10))
         self._btn_cruzar.bind("<Button-1>", lambda e: self._cruzar())
+
+        tk.Label(act_row, text="Filtro:", font=FONT_BODY, bg=BG, fg=TEXT2
+                 ).pack(side=tk.LEFT, padx=(0, 4))
+        self._filtro_var = tk.StringVar(value=self.FILTROS_EXPORT[0])
+        ttk.Combobox(act_row, textvariable=self._filtro_var,
+                     values=self.FILTROS_EXPORT, state="readonly",
+                     font=FONT_BODY, width=34).pack(side=tk.LEFT, padx=(0, 10))
 
         self._btn_exportar = tk.Label(act_row, text="💾  Exportar Excel",
                                       font=FONT_BODY, bg=BG3, fg=TEXT2,
@@ -200,25 +244,74 @@ class CruzarRemesasModule:
             filetypes=[("Excel", "*.xlsx *.xls *.xlsm"), ("CSV", "*.csv"), ("Todos", "*.*")])
         if not ruta:
             return
-        try:
-            if ruta.lower().endswith(".csv"):
+
+        self._nombre_archivo[cual] = ruta.split("/")[-1].split(chr(92))[-1]
+        combo_hoja = self._hoja_combos[cual]
+
+        # CSV: no tiene hojas, se deshabilita el selector
+        if ruta.lower().endswith(".csv"):
+            try:
                 df = pd.read_csv(ruta)
-            else:
-                df = pd.read_excel(ruta)
+            except Exception as e:
+                messagebox.showerror("Error al leer CSV", str(e))
+                return
+            self._xl_files[cual] = None
+            self._hoja_vars[cual].set("")
+            combo_hoja.configure(values=[], state="disabled")
+            self._aplicar_df(cual, df)
+            return
+
+        # Excel: leer hojas y poblar el selector
+        try:
+            xl = pd.ExcelFile(ruta)
         except Exception as e:
             messagebox.showerror("Error al leer Excel", str(e))
             return
+        hojas = xl.sheet_names
+        if not hojas:
+            messagebox.showwarning("Excel vacío", "El archivo no contiene hojas.")
+            return
 
+        self._xl_files[cual] = xl
+        combo_hoja.configure(values=hojas, state="readonly")
+        self._hoja_vars[cual].set(hojas[0])
+        try:
+            df = xl.parse(hojas[0])
+        except Exception as e:
+            messagebox.showerror("Error al leer la hoja", str(e))
+            return
+        self._aplicar_df(cual, df)
+
+    def _on_hoja_change(self, cual):
+        """Recarga el DataFrame de la hoja seleccionada y re-auto-mapea."""
+        xl = self._xl_files.get(cual)
+        if xl is None:
+            return
+        hoja = self._hoja_vars[cual].get()
+        try:
+            df = xl.parse(hoja)
+        except Exception as e:
+            messagebox.showerror("Error al leer la hoja", str(e))
+            return
+        self._aplicar_df(cual, df)
+
+    def _aplicar_df(self, cual, df):
+        """Asigna el df a la fuente indicada, actualiza la etiqueta de info,
+        rellena los combos de columnas y aplica el auto-mapeo por HINTS."""
         cols = ["— No usar —"] + list(df.columns.astype(str))
+        hoja = self._hoja_vars[cual].get()
+        info_hoja = f"hoja '{hoja}'  ·  " if hoja else ""
         if cual == "rg":
             self.df_rg = df
             self.cols_rg = cols
-            self._lbl_rg.configure(text=f"{ruta.split('/')[-1].split(chr(92))[-1]}  ·  {len(df)} filas", fg=TEXT)
+            self._lbl_rg.configure(
+                text=f"{self._nombre_archivo['rg']}  ·  {info_hoja}{len(df)} filas", fg=TEXT)
             campos = self.CAMPOS_RG
         else:
             self.df_otro = df
             self.cols_otro = cols
-            self._lbl_otro.configure(text=f"{ruta.split('/')[-1].split(chr(92))[-1]}  ·  {len(df)} filas", fg=TEXT)
+            self._lbl_otro.configure(
+                text=f"{self._nombre_archivo['otro']}  ·  {info_hoja}{len(df)} filas", fg=TEXT)
             campos = self.CAMPOS_OTRO
 
         for clave, _, _ in campos:
@@ -234,6 +327,23 @@ class CruzarRemesasModule:
                     break
             if not matched:
                 var.set("— No usar —")
+
+    @staticmethod
+    def _fmt_consec(v):
+        """
+        Formatea un consecutivo de remesa para mostrarlo limpio:
+        - NaN / vacío  → "" (cadena vacía)
+        - float entero (11519464.0) → "11519464" (sin el .0 que añade pandas)
+        - cualquier otro → su texto sin espacios
+        """
+        if pd.isna(v):
+            return ""
+        if isinstance(v, float) and v.is_integer():
+            return str(int(v))
+        s = str(v).strip()
+        if s.endswith(".0") and s[:-2].isdigit():
+            s = s[:-2]
+        return s
 
     @staticmethod
     def _to_num(v):
@@ -304,7 +414,7 @@ class CruzarRemesasModule:
                         pass
                 # Consecutivos en el orden en que aparecen en el otro Excel,
                 # para asignarlos en ese mismo orden a las líneas del RG.
-                consecutivos_otro = [str(v).strip() for v in g_otro[c["otro_col_consec"]]]
+                consecutivos_otro = [self._fmt_consec(v) for v in g_otro[c["otro_col_consec"]]]
             else:
                 n_remesas_otro = 0
                 suma_valor_otro = 0.0
@@ -360,15 +470,34 @@ class CruzarRemesasModule:
 
     # ── Exportación ───────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _pasa_filtro(filtro, rem, val, rec):
+        """Devuelve True si una factura con esas banderas (Sí/No) debe incluirse
+        según el filtro de exportación seleccionado."""
+        r = rem == "Sí"
+        v = val == "Sí"
+        x = rec == "Sí"
+        if filtro == "Todas":                                   return True
+        if filtro == "Solo Reconstruir = Sí":                   return x
+        if filtro == "Coinciden remesas, NO coincide valor":    return r and not v
+        if filtro == "Coincide valor, NO coinciden remesas":    return v and not r
+        if filtro == "NO coinciden remesas":                    return not r
+        if filtro == "NO coincide valor":                       return not v
+        if filtro == "Reconstruir = No (alguna no coincide)":   return not x
+        return True
+
     def _exportar(self):
         if not self._filas_resultado:
             messagebox.showwarning("Sin datos", "Primero ejecuta el cruce de información.")
             return
+
+        filtro = self._filtro_var.get() if self._filtro_var else "Todas"
+        sufijo = "" if filtro == "Todas" else "_filtrado"
         ruta_out = filedialog.asksaveasfilename(
             title="Guardar Excel",
             defaultextension=".xlsx",
             filetypes=[("Excel", "*.xlsx"), ("CSV", "*.csv")],
-            initialfile="cruce_remesas.xlsx")
+            initialfile=f"cruce_remesas{sufijo}.xlsx")
         if not ruta_out:
             return
         try:
@@ -396,11 +525,32 @@ class CruzarRemesasModule:
             df["Reconstruir"] = nf_serie.map(
                 lambda nf: self._mapa_resultado.get(nf, {}).get("reconstruir", "No"))
 
+            # Aplicar el filtro de exportación seleccionado (fila a fila, según
+            # las banderas de la factura a la que pertenece cada línea del RG).
+            if filtro != "Todas":
+                mask = [
+                    self._pasa_filtro(filtro, r, v, x)
+                    for r, v, x in zip(
+                        df["¿Coinciden remesas?"],
+                        df["¿Coincide valor factura con RG?"],
+                        df["Reconstruir"])
+                ]
+                df = df[mask]
+
+            if df.empty:
+                messagebox.showinfo("Sin resultados",
+                    f"Ninguna factura cumple el filtro '{filtro}'. No se generó archivo.")
+                return
+
             if ruta_out.endswith(".csv"):
                 df.to_csv(ruta_out, index=False, encoding="utf-8-sig")
             else:
                 df.to_excel(ruta_out, index=False)
-            self._lbl_estado.configure(text=f"✓ Exportado: {ruta_out}", fg=SUCCESS)
-            messagebox.showinfo("Exportado", f"Archivo guardado:\n{ruta_out}")
+            n_fac = df[self._col_rg_nf].astype(str).str.strip().nunique()
+            self._lbl_estado.configure(
+                text=f"✓ Exportado ({filtro}): {len(df)} filas · {n_fac} factura(s) → {ruta_out}",
+                fg=SUCCESS)
+            messagebox.showinfo("Exportado",
+                f"Archivo guardado ({filtro}):\n{ruta_out}\n\n{len(df)} filas · {n_fac} factura(s)")
         except Exception as ex:
             messagebox.showerror("Error al exportar", str(ex))
