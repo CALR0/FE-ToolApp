@@ -45,6 +45,7 @@ class EditarXMLModule:
         self.var_digito_cliente = tk.StringVar()
         self._numero_orig    = ""
         self._cufe_orig      = ""
+        self._cliente_orig   = ""
         self._fecha_orig     = ""  # valor literal en el XML (puede ser DD-MM-YYYY o YYYY-MM-DD)
         self._fecha_orig_iso = ""  # siempre YYYY-MM-DD
         self._total_orig     = ""  # valor tal como está en el XML
@@ -118,16 +119,15 @@ class EditarXMLModule:
                  highlightthickness=1, highlightbackground=BORDER,
                  highlightcolor=ACCENT).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # Fila Cliente (solo lectura)
+        # Fila Cliente (editable)
         row_cli = tk.Frame(gen_inner, bg=BG2)
         row_cli.pack(fill=tk.X, pady=3)
         tk.Label(row_cli, text="Cliente", font=FONT_BODY, bg=BG2,
                  fg=TEXT2, width=14, anchor="w").pack(side=tk.LEFT)
-        ent_cli = tk.Entry(row_cli, textvariable=self.var_cliente, font=FONT_BODY,
-                           bg=BG3, fg=TEXT2, relief="flat",
-                           highlightthickness=1, highlightbackground=BORDER,
-                           state="readonly")
-        ent_cli.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Entry(row_cli, textvariable=self.var_cliente, font=FONT_BODY,
+                 bg=BG3, fg=TEXT, insertbackground=TEXT, relief="flat",
+                 highlightthickness=1, highlightbackground=BORDER,
+                 highlightcolor=ACCENT).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # Fila NIT cliente + Dígito de verificación (editables)
         row_nit = tk.Frame(gen_inner, bg=BG2)
@@ -248,6 +248,7 @@ class EditarXMLModule:
         self.remesas       = []
         self._numero_orig     = ""
         self._cufe_orig       = ""
+        self._cliente_orig    = ""
         self._fecha_orig      = ""
         self._fecha_orig_iso  = ""
         self._total_orig      = ""
@@ -341,6 +342,7 @@ class EditarXMLModule:
                 mc = re.search(r"<cac:PartyName>\s*<cbc:Name>([^<]+)</cbc:Name>", bloque)
             nombre_cli = mc.group(1).strip() if mc else ""
         self.var_cliente.set(nombre_cli)
+        self._cliente_orig = nombre_cli
 
         # NIT cliente y dígito de verificación.
         # Algunos XML (generados por core/xml_generator.py) tienen PartyIdentification
@@ -696,20 +698,52 @@ class EditarXMLModule:
                         f"La fecha '{fecha_nueva}' no tiene el formato YYYY-MM-DD.\n"
                         "Las fechas no fueron actualizadas.")
 
+            # ── Nombre cliente ────────────────────────────────────────────────
+            cliente_nuevo = self.var_cliente.get().strip()
+            if cliente_nuevo and self._cliente_orig and cliente_nuevo != self._cliente_orig:
+                # 1. Dentro del AccountingCustomerParty (CDATA): PartyName y RegistrationName
+                cust_start_c = contenido_nuevo.find("<cac:AccountingCustomerParty")
+                cust_end_c   = contenido_nuevo.find("</cac:AccountingCustomerParty>", cust_start_c)
+                if cust_start_c != -1 and cust_end_c != -1:
+                    cust_end_c += len("</cac:AccountingCustomerParty>")
+                    bloque_c = contenido_nuevo[cust_start_c:cust_end_c]
+                    bloque_c = bloque_c.replace(
+                        f"<cbc:Name>{self._cliente_orig}</cbc:Name>",
+                        f"<cbc:Name>{cliente_nuevo}</cbc:Name>")
+                    bloque_c = bloque_c.replace(
+                        f"<cbc:RegistrationName>{self._cliente_orig}</cbc:RegistrationName>",
+                        f"<cbc:RegistrationName>{cliente_nuevo}</cbc:RegistrationName>")
+                    contenido_nuevo = contenido_nuevo[:cust_start_c] + bloque_c + contenido_nuevo[cust_end_c:]
+
+                # 2. ReceiverParty externo del AttachedDocument (antes del primer CDATA)
+                first_cdata_c = contenido_nuevo.find("<![CDATA[")
+                outer_lim_c = first_cdata_c if first_cdata_c != -1 else len(contenido_nuevo)
+                recv_s = contenido_nuevo.find("<cac:ReceiverParty", 0)
+                if recv_s != -1 and recv_s < outer_lim_c:
+                    recv_e_tag = contenido_nuevo.find("</cac:ReceiverParty>", recv_s)
+                    if recv_e_tag != -1:
+                        recv_e = recv_e_tag + len("</cac:ReceiverParty>")
+                        bloque_r = contenido_nuevo[recv_s:recv_e]
+                        bloque_r = bloque_r.replace(
+                            f"<cbc:RegistrationName>{self._cliente_orig}</cbc:RegistrationName>",
+                            f"<cbc:RegistrationName>{cliente_nuevo}</cbc:RegistrationName>")
+                        contenido_nuevo = contenido_nuevo[:recv_s] + bloque_r + contenido_nuevo[recv_e:]
+
+                self._cliente_orig = cliente_nuevo
+
             # ── NIT cliente + Dígito de verificación ──────────────────────────
             nit_nuevo = self.var_nit_cliente.get().strip()
             dig_nuevo = self.var_digito_cliente.get().strip()
             if nit_nuevo and dig_nuevo and (
                 nit_nuevo != self._nit_cliente_orig or dig_nuevo != self._digito_cliente_orig
             ):
+                # 1. AccountingCustomerParty dentro del CDATA del Invoice
                 cust_start = contenido_nuevo.find("<cac:AccountingCustomerParty")
                 cust_end_tag = contenido_nuevo.find("</cac:AccountingCustomerParty>", cust_start)
                 if cust_start != -1 and cust_end_tag != -1:
                     cust_end = cust_end_tag + len("</cac:AccountingCustomerParty>")
                     bloque = contenido_nuevo[cust_start:cust_end]
                     bloque_nuevo = bloque
-                    # Reemplaza únicamente dentro del bloque del Customer, sin tocar
-                    # el resto del XML (ej. el NIT de la UT/socio en otro lugar).
                     if self._digito_cliente_orig:
                         bloque_nuevo = bloque_nuevo.replace(
                             f'schemeID="{self._digito_cliente_orig}"', f'schemeID="{dig_nuevo}"')
@@ -717,6 +751,26 @@ class EditarXMLModule:
                         bloque_nuevo = bloque_nuevo.replace(
                             f">{self._nit_cliente_orig}<", f">{nit_nuevo}<")
                     contenido_nuevo = contenido_nuevo[:cust_start] + bloque_nuevo + contenido_nuevo[cust_end:]
+
+                # 2. ReceiverParty externo del AttachedDocument (antes del primer CDATA).
+                #    El RNDC valida que coincida con el AccountingCustomerParty del Invoice.
+                first_cdata = contenido_nuevo.find("<![CDATA[")
+                outer_limit = first_cdata if first_cdata != -1 else len(contenido_nuevo)
+                recv_start = contenido_nuevo.find("<cac:ReceiverParty", 0)
+                if recv_start != -1 and recv_start < outer_limit:
+                    recv_end_tag = contenido_nuevo.find("</cac:ReceiverParty>", recv_start)
+                    if recv_end_tag != -1:
+                        recv_end = recv_end_tag + len("</cac:ReceiverParty>")
+                        bloque_recv = contenido_nuevo[recv_start:recv_end]
+                        bloque_recv_nuevo = bloque_recv
+                        if self._digito_cliente_orig:
+                            bloque_recv_nuevo = bloque_recv_nuevo.replace(
+                                f'schemeID="{self._digito_cliente_orig}"', f'schemeID="{dig_nuevo}"')
+                        if self._nit_cliente_orig:
+                            bloque_recv_nuevo = bloque_recv_nuevo.replace(
+                                f">{self._nit_cliente_orig}<", f">{nit_nuevo}<")
+                        contenido_nuevo = contenido_nuevo[:recv_start] + bloque_recv_nuevo + contenido_nuevo[recv_end:]
+
                 self._nit_cliente_orig    = nit_nuevo
                 self._digito_cliente_orig = dig_nuevo
 
@@ -726,6 +780,7 @@ class EditarXMLModule:
             self.contenido_xml   = contenido_nuevo
             self._numero_orig    = self.var_numero.get().strip()
             self._cufe_orig      = self.var_cufe.get().strip()
+            self._cliente_orig   = self.var_cliente.get().strip()
             _f_guardada          = self.var_fecha.get().strip()
             self._fecha_orig     = _f_guardada
             self._fecha_orig_iso = _f_guardada
