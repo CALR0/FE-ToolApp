@@ -90,11 +90,21 @@ Mapeo **opcional de cliente por columna**: campos `NIT cliente` y `Nombre client
 
 **Filtro de generación** (`FILTROS_GEN`): combobox que permite generar solo un subconjunto cuando el Excel trae las columnas de validación del cruce (`¿Coinciden remesas?`, `¿Coincide valor factura con RG?`, `Reconstruir`). Opciones: Todas / Solo Reconstruir=Sí / Coinciden remesas NO valor / Coincide valor NO remesas / NO coinciden remesas / NO coincide valor. Es **opcional**: por defecto "Todas (sin filtro)" y funciona con cualquier Excel normal; solo si se elige un filtro y faltan esas columnas, avisa y no genera (helpers `_cols_cruce`, `_pasa_filtro`, `_es_si`).
 
+**Consecutivos sin `.0`**: en `_parsear()`, al leer la columna de consecutivo/remesa se aplica limpieza explícita de float entero (pandas lee enteros como `float64` → `"11519464.0"`). Lógica: si `isinstance(v, float) and v.is_integer()` → `str(int(v))`; si el string termina en `.0` y el resto es dígitos → se recorta. Esto es crítico cuando el Excel de entrada viene del módulo de cruce de remesas.
+
+**Radicados automáticos**: en `_generar_todos()`, antes de generar los XML se itera cada remesa y si el radicado viene vacío, `"nan"`, `"none"` o `"0"`, se llama a `consultar_radicado_remesa(consec, perfil)` contra el RNDC. El radicado se llena automáticamente; si la consulta falla queda `"0"`. Solo funciona si el consecutivo está bien formateado (garantizado por la limpieza anterior).
+
 ### `ui/rndc_uploader.py` — RndcUploaderWindow
 Sube archivos XML al portal web del RNDC mediante requests HTTP. Registra logs en `rndc_debug.log` en la raíz del proyecto.
 
 ### `ui/consultar_remesas.py` — ConsultarRemesasModule
-Interfaz para consultar remesas individuales o en lote al RNDC SOAP WS. Muestra consecutivo, radicado e INGRESOID.
+Interfaz para consultar remesas individuales o en lote al RNDC SOAP WS. Muestra consecutivo, radicado, peso, **N° Manifiesto** (`nummanifiestocarga`), propietario, origen, destino y estado.
+
+**Consulta masiva** — modal con dos pestañas:
+- **Pegar consecutivos**: cuadro de texto libre; acepta números separados por comas, espacios, punto y coma o saltos de línea (cualquier combinación).
+- **Desde Excel**: carga un `.xlsx`, selecciona hoja y columna de consecutivos.
+
+Ambas pestañas comparten la misma tabla de resultados y el botón "Guardar resultados" que exporta a Excel/CSV incluyendo la columna "N° Manifiesto".
 
 ### `ui/editar_xml.py` — EditarXMLModule
 Abre un XML de factura existente, parsea sus remesas (InvoiceLine) y permite edición inline (doble clic en celda). Actualiza N° factura, CUFE, fecha, valor total, **Cliente (nombre), NIT cliente y dígito de verificación** (todos editables, ver convención abajo), y por remesa: consecutivo, radicado, valor, peso, descripción. Al cargar consulta el RNDC automáticamente.
@@ -129,6 +139,8 @@ Valores monetarios robustos vía `_to_num` (quita `$`, espacios y separadores an
 **Filtro de exportación** (`FILTROS_EXPORT`, helper `_pasa_filtro`): Todas / Solo Reconstruir=Sí / Coinciden remesas NO valor / Coincide valor NO remesas / NO coinciden remesas / NO coincide valor / Reconstruir=No. Genera solo el subconjunto elegido (con todas las columnas del RG), evitando filtrar a mano en Excel.
 
 Al exportar, parte del Excel de RG **completo** (todas sus columnas/filas originales, sin la columna `consecutivo_remesa` que se descarta por venir vacía) y le anexa las 3 columnas de validación más `Consecutivo Remesa (Otro Excel)` — este último se asigna **posicionalmente** (línea N del RG ↔ remesa N del otro Excel, en orden de aparición); si el otro Excel tiene menos remesas que líneas el RG, las líneas sobrantes quedan vacías; si tiene **más**, los consecutivos sobrantes no se muestran. (No es un cruce por valor, es por orden de aparición.)
+
+**Columna opcional `Comp. Generador Carga RNDC`** (`otro_col_comp_gen`): campo opcional del otro Excel. Si se mapea en la UI, sus valores se recogen en `_comp_gen_otro_por_factura` (por factura, en orden posicional) y el Excel exportado incluye la columna `"Comp. Generador Carga RNDC"` alineada a cada remesa del RG. Si no se mapea, la columna no aparece en el reporte. Auto-detección por hints: `"comp. generador"`, `"comp_generador"`, `"generador carga"`, `"generadorcarga"`, `"rndc"`.
 
 > Nota sobre conteos: como `¿Coinciden remesas?` cuenta **filas**, si el otro Excel trae remesas duplicadas o filas con consecutivo en blanco, el conteo puede no cuadrar con los consecutivos únicos visibles.
 
@@ -176,7 +188,7 @@ Cada perfil tiene:
 | `_parse_valor(texto)` | `core/xml_generator.py` | Convierte "1.777.777,00" / "1,777,777.00" / "1777777" → float |
 | `_fmt_valor(valor)` | `core/xml_generator.py` | Convierte float → string sin decimales si es entero ("1777777") |
 | `reconstruir_factura(...)` | `core/xml_transformer.py` | Aplica 11 transformaciones DIAN al XML |
-| `consultar_radicado_remesa(consecutivo, perfil)` | `services/rndc_service.py` | Retorna `(ok: bool, resultado: dict)` con `radicado` y `peso` |
+| `consultar_radicado_remesa(consecutivo, perfil)` | `services/rndc_service.py` | Retorna `(ok: bool, resultado: dict)` con `radicado`, `peso`, `estado`, `propietario`, `origen`, `destino`, `manifiesto` (`nummanifiestocarga`) |
 | `consultar_remesa_completa(consecutivo, perfil)` | `services/rndc_service.py` | Proceso 3 / `tipo=3` / `variables=*`. Retorna `(ok, dict)` con TODOS los campos de la remesa |
 | `corregir_remesa(variables, perfil)` | `services/rndc_service.py` | Proceso 38 / `tipo=1`. Envía a `rndcws.mintransporte.gov.co:8080` (sin "2"). `variables` es dict (orden respetado). Retorna `(ok, {ingresoid})` |
 | `resource_path(relative)` | `utils/helpers.py` | Resuelve rutas para PyInstaller: sube un nivel desde `utils/` para encontrar archivos en la raíz |
@@ -217,8 +229,17 @@ La app está pensada para distribuirse como `.exe` con PyInstaller `--onefile`. 
 python main.py
 
 # Compilar con PyInstaller (usar el .spec oficial — ya incluye freeze_support, icono y deps)
-pyinstaller FE-Tool.spec
+# IMPORTANTE: ejecutar desde dentro de FE-ToolApp\ (pathex=['.'] en el spec)
+C:\Users\clizarazo\AppData\Local\Python\pythoncore-3.14-64\Scripts\pyinstaller.exe FE-Tool.spec
 ```
+
+El `.exe` queda en `FE-ToolApp\dist\FE-Tool.exe`.
+
+**Notas sobre la compilación:**
+- Python 3.14 + PyInstaller 6.20.0 funciona correctamente con este proyecto.
+- No usar `python -m pyinstaller` en esta instalación — falla. Usar la ruta absoluta al `.exe` de PyInstaller como se muestra arriba.
+- El spec no necesita `threading` en hiddenimports — PyInstaller lo detecta como stdlib automáticamente.
+- UPX está desactivado (`upx=False`) para evitar falsos positivos de antivirus.
 
 ## Dependencias principales
 

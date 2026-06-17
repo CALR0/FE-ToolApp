@@ -17,13 +17,14 @@ from services.rndc_service import consultar_radicado_remesa
 class ConsultarRemesasModule:
 
     COLUMNAS = [
-        ("Consecutivo",  13),
-        ("Radicado",     14),
-        ("Peso (KG)",     9),
-        ("Propietario",  20),
-        ("Origen",       18),
-        ("Destino",      18),
-        ("Estado",       24),
+        ("Consecutivo",   13),
+        ("Radicado",      14),
+        ("Peso (KG)",      9),
+        ("N° Manifiesto", 16),
+        ("Propietario",   20),
+        ("Origen",        18),
+        ("Destino",       18),
+        ("Estado",        24),
     ]
 
     def __init__(self, parent, perfil_fn):
@@ -109,13 +110,14 @@ class ConsultarRemesasModule:
         ficha.pack(fill=tk.X)
 
         self._v = {k: tk.StringVar() for k in
-                   ("radicado", "propietario", "origen", "destino", "cantidad", "estado")}
+                   ("radicado", "propietario", "origen", "destino", "cantidad", "estado", "manifiesto")}
 
-        self._campo(ficha, "Radicado",    self._v["radicado"],  row=0, col_start=0, ancho=20)
-        self._campo(ficha, "Cantidad", self._v["cantidad"],  row=0, col_start=2, ancho=12)
-        self._campo(ficha, "Propietario", self._v["propietario"], row=1, col_start=0, ancho=44)
-        self._campo(ficha, "Origen",  self._v["origen"],  row=2, col_start=0, ancho=22)
-        self._campo(ficha, "Destino", self._v["destino"], row=2, col_start=2, ancho=22)
+        self._campo(ficha, "Radicado",       self._v["radicado"],    row=0, col_start=0, ancho=20)
+        self._campo(ficha, "Cantidad",       self._v["cantidad"],    row=0, col_start=2, ancho=12)
+        self._campo(ficha, "N° Manifiesto",  self._v["manifiesto"],  row=0, col_start=4, ancho=16)
+        self._campo(ficha, "Propietario",    self._v["propietario"], row=1, col_start=0, ancho=44)
+        self._campo(ficha, "Origen",         self._v["origen"],      row=2, col_start=0, ancho=22)
+        self._campo(ficha, "Destino",        self._v["destino"],     row=2, col_start=2, ancho=22)
         tk.Label(ficha, text="Estado", font=FONT_SMALL, bg=BG2,
                  fg=TEXT2, anchor="w").grid(row=6, column=0, sticky="w",
                  padx=(14, 4), pady=(8, 0))
@@ -184,33 +186,58 @@ class ConsultarRemesasModule:
             messagebox.showerror("Error", "pandas no está instalado.\nEjecuta: pip install pandas openpyxl")
             return
 
+        import re as _re
+
         modal = tk.Toplevel(self.win)
-        modal.title("Consulta masiva desde Excel")
+        modal.title("Consulta masiva de remesas")
         modal.configure(bg=BG)
-        modal.geometry("580x540")
+        modal.geometry("680x620")
         modal.resizable(True, True)
         modal.grab_set()
         modal.transient(self.win)
 
-        state = {"df": None, "ruta": None}
-        var_hoja   = tk.StringVar()
-        var_col    = tk.StringVar()
-        var_status = tk.StringVar(value="Carga un archivo Excel para comenzar.")
+        var_status = tk.StringVar(value="Selecciona una fuente de datos para comenzar.")
 
-        tk.Label(modal, text="📂  Consulta masiva desde Excel", font=FONT_H2,
+        tk.Label(modal, text="📋  Consulta masiva de remesas", font=FONT_H2,
                  bg=BG, fg=TEXT, pady=12).pack(fill=tk.X, padx=20)
         tk.Frame(modal, bg=BORDER, height=1).pack(fill=tk.X, padx=20)
 
-        sec1 = tk.Frame(modal, bg=BG, pady=10)
-        sec1.pack(fill=tk.X, padx=20)
-        tk.Label(sec1, text="1. Archivo Excel:", font=FONT_BODY,
-                 bg=BG, fg=TEXT2).pack(anchor="w")
+        # ── Pestañas: Pegar texto / Desde Excel ──────────────────────────────
+        nb = ttk.Notebook(modal)
+        nb.pack(fill=tk.X, padx=20, pady=(10, 0))
 
-        fila_arch = tk.Frame(sec1, bg=BG)
-        fila_arch.pack(fill=tk.X, pady=(4,0))
+        # ── Tab 1: Pegar consecutivos ─────────────────────────────────────────
+        tab_texto = tk.Frame(nb, bg=BG, padx=10, pady=10)
+        nb.add(tab_texto, text="  ✏️  Pegar consecutivos  ")
+
+        tk.Label(tab_texto,
+                 text="Pega los consecutivos separados por comas, espacios o saltos de línea:",
+                 font=FONT_SMALL, bg=BG, fg=TEXT2).pack(anchor="w")
+        txt_frame = tk.Frame(tab_texto, bg=BG3)
+        txt_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        txt_consec = tk.Text(txt_frame, font=FONT_BODY, width=60, height=5,
+                             bg=BG3, fg=TEXT, insertbackground=TEXT,
+                             relief="flat", bd=4, wrap="word")
+        txt_consec.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb_txt = ttk.Scrollbar(txt_frame, orient="vertical", command=txt_consec.yview)
+        vsb_txt.pack(side=tk.RIGHT, fill=tk.Y)
+        txt_consec.configure(yscrollcommand=vsb_txt.set)
+
+        # ── Tab 2: Desde Excel ────────────────────────────────────────────────
+        tab_excel = tk.Frame(nb, bg=BG, padx=10, pady=10)
+        nb.add(tab_excel, text="  📂  Desde Excel  ")
+
+        state    = {"df": None, "ruta": None}
+        var_hoja = tk.StringVar()
+        var_col  = tk.StringVar()
+
+        tk.Label(tab_excel, text="Archivo Excel:", font=FONT_BODY,
+                 bg=BG, fg=TEXT2).pack(anchor="w")
+        fila_arch = tk.Frame(tab_excel, bg=BG)
+        fila_arch.pack(fill=tk.X, pady=(4, 6))
         lbl_ruta = tk.Label(fila_arch, text="Sin archivo cargado", font=FONT_SMALL,
                             bg=BG3, fg=TEXT2, anchor="w", padx=8, pady=5,
-                            relief="flat", width=42)
+                            relief="flat", width=44)
         lbl_ruta.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         combo_hoja = None
@@ -224,7 +251,7 @@ class ConsultarRemesasModule:
                 return
             try:
                 xl = pd.ExcelFile(ruta)
-                state["ruta"]  = ruta
+                state["ruta"] = ruta
                 nombre = ruta.split("/")[-1].split("\\")[-1]
                 lbl_ruta.configure(text=nombre, fg=TEXT)
                 combo_hoja["values"] = xl.sheet_names
@@ -236,16 +263,16 @@ class ConsultarRemesasModule:
 
         btn_arch = tk.Label(fila_arch, text=" Examinar ", font=FONT_BODY,
                             bg=ACCENT, fg="white", cursor="hand2", padx=8, pady=5)
-        btn_arch.pack(side=tk.LEFT, padx=(8,0))
+        btn_arch.pack(side=tk.LEFT, padx=(8, 0))
         btn_arch.bind("<Button-1>", lambda e: _cargar_archivo())
 
-        sec2 = tk.Frame(modal, bg=BG, pady=6)
-        sec2.pack(fill=tk.X, padx=20)
-        tk.Label(sec2, text="2. Hoja:", font=FONT_BODY,
-                 bg=BG, fg=TEXT2).pack(anchor="w")
-        combo_hoja = ttk.Combobox(sec2, textvariable=var_hoja,
-                                  state="readonly", font=FONT_BODY, width=36)
-        combo_hoja.pack(anchor="w", pady=(4,0))
+        fila_hoja = tk.Frame(tab_excel, bg=BG)
+        fila_hoja.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(fila_hoja, text="Hoja:", font=FONT_BODY,
+                 bg=BG, fg=TEXT2, width=8, anchor="w").pack(side=tk.LEFT)
+        combo_hoja = ttk.Combobox(fila_hoja, textvariable=var_hoja,
+                                  state="readonly", font=FONT_BODY, width=32)
+        combo_hoja.pack(side=tk.LEFT)
 
         def _on_hoja(e=None):
             if not state["ruta"] or not var_hoja.get():
@@ -262,42 +289,45 @@ class ConsultarRemesasModule:
 
         combo_hoja.bind("<<ComboboxSelected>>", _on_hoja)
 
-        sec3 = tk.Frame(modal, bg=BG, pady=6)
-        sec3.pack(fill=tk.X, padx=20)
-        tk.Label(sec3, text="3. Columna de consecutivos de remesa:", font=FONT_BODY,
-                 bg=BG, fg=TEXT2).pack(anchor="w")
-        combo_col = ttk.Combobox(sec3, textvariable=var_col,
-                                 state="readonly", font=FONT_BODY, width=36)
-        combo_col.pack(anchor="w", pady=(4,0))
+        fila_col = tk.Frame(tab_excel, bg=BG)
+        fila_col.pack(fill=tk.X)
+        tk.Label(fila_col, text="Columna:", font=FONT_BODY,
+                 bg=BG, fg=TEXT2, width=8, anchor="w").pack(side=tk.LEFT)
+        combo_col = ttk.Combobox(fila_col, textvariable=var_col,
+                                 state="readonly", font=FONT_BODY, width=32)
+        combo_col.pack(side=tk.LEFT)
 
-        tk.Frame(modal, bg=BORDER, height=1).pack(fill=tk.X, padx=20, pady=(12,0))
+        # ── Estado + barra de progreso ────────────────────────────────────────
+        tk.Frame(modal, bg=BORDER, height=1).pack(fill=tk.X, padx=20, pady=(10, 0))
         lbl_status_m = tk.Label(modal, textvariable=var_status, font=FONT_SMALL,
-                                bg=BG, fg=TEXT2, anchor="w", wraplength=500)
-        lbl_status_m.pack(fill=tk.X, padx=20, pady=6)
-
+                                bg=BG, fg=TEXT2, anchor="w", wraplength=600)
+        lbl_status_m.pack(fill=tk.X, padx=20, pady=(6, 2))
         pb_frame = tk.Frame(modal, bg=BG)
-        pb_frame.pack(fill=tk.X, padx=20)
-        pb = ttk.Progressbar(pb_frame, orient="horizontal",
-                              mode="determinate", length=520)
+        pb_frame.pack(fill=tk.X, padx=20, pady=(0, 4))
+        pb = ttk.Progressbar(pb_frame, orient="horizontal", mode="determinate")
         pb.pack(fill=tk.X)
 
-        tk.Frame(modal, bg=BORDER, height=1).pack(fill=tk.X, padx=20, pady=(6,0))
+        # ── Botones ───────────────────────────────────────────────────────────
+        tk.Frame(modal, bg=BORDER, height=1).pack(fill=tk.X, padx=20)
         fila_btns = tk.Frame(modal, bg=BG, pady=8)
         fila_btns.pack(fill=tk.X, padx=20)
 
         btn_guardar = tk.Label(fila_btns, text="  💾 Guardar resultados  ",
                                font=FONT_BODY, bg=BG3, fg=TEXT2,
                                cursor="hand2", padx=8, pady=5)
-        btn_guardar.pack(side=tk.RIGHT, padx=(8,0))
+        btn_guardar.pack(side=tk.RIGHT, padx=(8, 0))
 
         btn_consultar_m = tk.Label(fila_btns, text="  Consultar todas  ",
                                    font=FONT_BODY, bg=ACCENT, fg="white",
                                    cursor="hand2", padx=8, pady=5)
         btn_consultar_m.pack(side=tk.RIGHT)
 
+        # ── Tabla de resultados ───────────────────────────────────────────────
         tbl_m_frame = tk.Frame(modal, bg=BG2)
-        tbl_m_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0,10))
-        cols_m = ("Consecutivo", "Radicado", "Peso", "Propietario", "Origen", "Destino", "Estado")
+        tbl_m_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 10))
+
+        cols_m = ("Consecutivo", "Radicado", "Peso", "N° Manifiesto",
+                  "Propietario", "Origen", "Destino", "Estado")
         self._mk_tree_style("Modal")
         tree_m = ttk.Treeview(tbl_m_frame, columns=cols_m,
                               show="headings", height=7,
@@ -308,31 +338,42 @@ class ConsultarRemesasModule:
         vsb_m.pack(side=tk.RIGHT, fill=tk.Y)
         hsb_m.pack(side=tk.BOTTOM, fill=tk.X)
         tree_m.pack(fill=tk.BOTH, expand=True)
-        anchos = (13, 13, 8, 18, 14, 14, 18)
+        anchos = (13, 13, 8, 14, 18, 14, 14, 18)
         for nombre, ancho in zip(cols_m, anchos):
             tree_m.heading(nombre, text=nombre)
-            tree_m.column(nombre, width=ancho*7, anchor="w", minwidth=50)
+            tree_m.column(nombre, width=ancho * 7, anchor="w", minwidth=50)
         tree_m.tag_configure("ok",    background=BG2, foreground="#4ade80")
         tree_m.tag_configure("warn",  background=BG2, foreground="#fbbf24")
         tree_m.tag_configure("error", background=BG2, foreground="#f87171")
 
         resultados = []
 
-        def _consultar_masivo():
-            if not state["ruta"] or not var_hoja.get() or not var_col.get():
-                var_status.set("⚠ Selecciona archivo, hoja y columna primero.")
-                return
-            try:
-                df = pd.read_excel(state["ruta"], sheet_name=var_hoja.get(), dtype=str)
-                col = var_col.get()
-                consecutivos = df[col].dropna().astype(str).str.strip().tolist()
-                consecutivos = [c for c in consecutivos if c]
-            except Exception as ex:
-                var_status.set(f"✗ Error leyendo datos: {ex}")
-                return
+        def _obtener_consecutivos():
+            """Devuelve la lista de consecutivos según la pestaña activa."""
+            tab_activa = nb.index(nb.select())
+            if tab_activa == 0:
+                # Pestaña "Pegar consecutivos"
+                texto = txt_consec.get("1.0", tk.END)
+                tokens = _re.split(r"[\s,;]+", texto)
+                return [t.strip() for t in tokens if t.strip()]
+            else:
+                # Pestaña "Desde Excel"
+                if not state["ruta"] or not var_hoja.get() or not var_col.get():
+                    var_status.set("⚠ Selecciona archivo, hoja y columna primero.")
+                    return []
+                try:
+                    df = pd.read_excel(state["ruta"], sheet_name=var_hoja.get(), dtype=str)
+                    col = var_col.get()
+                    items = df[col].dropna().astype(str).str.strip().tolist()
+                    return [c for c in items if c]
+                except Exception as ex:
+                    var_status.set(f"✗ Error leyendo datos: {ex}")
+                    return []
 
+        def _consultar_masivo():
+            consecutivos = _obtener_consecutivos()
             if not consecutivos:
-                var_status.set("⚠ La columna seleccionada no tiene datos.")
+                var_status.set("⚠ No hay consecutivos para consultar.")
                 return
 
             for r in tree_m.get_children():
@@ -356,24 +397,28 @@ class ConsultarRemesasModule:
                     propietario = resultado.get("propietario", "")
                     origen      = resultado.get("origen", "")
                     destino     = resultado.get("destino", "")
+                    manifiesto  = resultado.get("manifiesto", "")
                     cod_est     = resultado.get("estado", "")
                     estado_txt, _ = self._estado_txt_color(cod_est)
                     tag = "ok" if cod_est == "CE" else ("warn" if cod_est == "AC" else "ok")
                 else:
-                    radicado = peso = propietario = origen = destino = "—"
-                    if "RNDC11" in str(resultado):
-                        estado_txt = "No emitida o cerrada"
-                    else:
-                        estado_txt = str(resultado)[:50]
+                    radicado = peso = propietario = origen = destino = manifiesto = "—"
+                    estado_txt = "No emitida o cerrada" if "RNDC11" in str(resultado) else str(resultado)[:50]
                     tag = "error"
 
                 tree_m.insert("", "end",
-                    values=(consec, radicado, peso, propietario, origen, destino, estado_txt),
+                    values=(consec, radicado, peso, manifiesto,
+                            propietario, origen, destino, estado_txt),
                     tags=(tag,))
                 resultados.append({
-                    "Consecutivo": consec, "Radicado": radicado,
-                    "Peso (KG)": peso, "Propietario": propietario,
-                    "Origen": origen, "Destino": destino, "Estado": estado_txt,
+                    "Consecutivo":    consec,
+                    "Radicado":       radicado,
+                    "Peso (KG)":      peso,
+                    "N° Manifiesto":  manifiesto,
+                    "Propietario":    propietario,
+                    "Origen":         origen,
+                    "Destino":        destino,
+                    "Estado":         estado_txt,
                 })
                 pb["value"] = i
                 modal.update_idletasks()
@@ -394,7 +439,6 @@ class ConsultarRemesasModule:
             if not ruta_out:
                 return
             try:
-                import pandas as pd
                 df_out = pd.DataFrame(resultados)
                 if ruta_out.endswith(".csv"):
                     df_out.to_csv(ruta_out, index=False, encoding="utf-8-sig")
@@ -436,6 +480,7 @@ class ConsultarRemesasModule:
             origen      = resultado.get("origen", "")
             destino     = resultado.get("destino", "")
             cod_est     = resultado.get("estado", "")
+            manifiesto  = resultado.get("manifiesto", "")
             estado_txt, color = self._estado_txt_color(cod_est)
 
             self._v["radicado"].set(radicado)
@@ -444,11 +489,12 @@ class ConsultarRemesasModule:
             self._v["destino"].set(destino)
             self._v["cantidad"].set(peso if peso != "" else "")
             self._v["estado"].set(estado_txt)
+            self._v["manifiesto"].set(manifiesto)
             self._lbl_estado.configure(fg=color)
 
             tag = "ok" if cod_est == "CE" else ("warn" if cod_est == "AC" else "ok")
             self._tree.insert("", 0,
-                values=(consec, radicado, peso, propietario, origen, destino, estado_txt),
+                values=(consec, radicado, peso, manifiesto, propietario, origen, destino, estado_txt),
                 tags=(tag,))
 
             msg = f"  ✓ Remesa {consec}: radicado={radicado}  estado={estado_txt}"
@@ -464,7 +510,7 @@ class ConsultarRemesasModule:
             self._lbl_estado.configure(fg="#f87171")
 
             self._tree.insert("", 0,
-                values=(consec, "—", "—", "—", "—", "—", f"✗ {estado_txt}"),
+                values=(consec, "—", "—", "—", "—", "—", "—", f"✗ {estado_txt}"),
                 tags=("error",))
             self._lbl_status.configure(
                 text=f"  ✗ Remesa {consec}: {estado_txt}", fg=WARNING)

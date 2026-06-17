@@ -18,7 +18,7 @@ _RNDC_CONSULTA_REMESA_TMPL = """<?xml version='1.0' encoding='ISO-8859-1' ?>
     <tipo>3</tipo>
     <procesoid>3</procesoid>
   </solicitud>
-  <variables>INGRESOID,CONSECUTIVOREMESA,CANTIDADCARGADA,ESTADO,REMPROPIETARIO,REM_DESTI,REM_ORIG</variables>
+  <variables>INGRESOID,CONSECUTIVOREMESA,CANTIDADCARGADA,ESTADO,REMPROPIETARIO,REM_DESTI,REM_ORIG,NUMMANIFIESTOCARGA</variables>
   <documento>
     <NUMNITEMPRESATRANSPORTE>'{nit_empresa}'</NUMNITEMPRESATRANSPORTE>
     <CONSECUTIVOREMESA>'{consecutivo_remesa}'</CONSECUTIVOREMESA>
@@ -170,9 +170,11 @@ def consultar_radicado_remesa(consecutivo_remesa, perfil):
         propietario = todos.get("rempropietario", "").strip()
         destino     = todos.get("rem_desti", "").strip()
         origen      = todos.get("rem_orig", "").strip()
-        _log(f"INGRESOID={radicado}  cantidadcargada={cp!r}  estado={estado!r}  propietario={propietario!r}  origen={origen!r}  destino={destino!r}")
+        manifiesto  = todos.get("nummanifiestocarga", "").strip()
+        _log(f"INGRESOID={radicado}  cantidadcargada={cp!r}  estado={estado!r}  propietario={propietario!r}  origen={origen!r}  destino={destino!r}  manifiesto={manifiesto!r}")
         return True, {"radicado": radicado, "peso": peso, "estado": estado,
-                      "propietario": propietario, "origen": origen, "destino": destino}
+                      "propietario": propietario, "origen": origen, "destino": destino,
+                      "manifiesto": manifiesto}
 
     # Capturar ErrorMSG (tag real del RNDC para errores)
     errmsg_el = root_el.find(".//ErrorMSG")

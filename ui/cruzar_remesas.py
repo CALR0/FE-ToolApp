@@ -31,9 +31,10 @@ class CruzarRemesasModule:
         ("rg_col_val_fac", "Valor total factura",   True),
     ]
     CAMPOS_OTRO = [
-        ("otro_col_nf",     "N° Factura",           True),
-        ("otro_col_consec", "Consecutivo / Remesa", True),
-        ("otro_col_val_un", "Valor unitario remesa", True),
+        ("otro_col_nf",       "N° Factura",                   True),
+        ("otro_col_consec",   "Consecutivo / Remesa",         True),
+        ("otro_col_val_un",   "Valor unitario remesa",        True),
+        ("otro_col_comp_gen", "Comp. Generador Carga RNDC",   False),
     ]
 
     # Opciones de filtro para la exportación. El valor es una función que recibe
@@ -54,7 +55,8 @@ class CruzarRemesasModule:
         "rg_col_val_fac":  ["valor_total_factura", "valor_factura", "val_fac", "total_factura"],
         "otro_col_nf":     ["factura", "nfactura", "num_fac", "n_factura", "numero_factura"],
         "otro_col_consec": ["remesa", "consecutivo", "consec"],
-        "otro_col_val_un": ["valor_unitario", "vr_unitario", "valor_remesa", "val_rem", "vunit"],
+        "otro_col_val_un":   ["valor_unitario", "vr_unitario", "valor_remesa", "val_rem", "vunit"],
+        "otro_col_comp_gen": ["comp. generador", "comp_generador", "generador carga", "generadorcarga", "rndc"],
     }
 
     def __init__(self):
@@ -74,6 +76,7 @@ class CruzarRemesasModule:
         self._mapa_resultado = {}
         self._col_rg_nf = None
         self._consecutivos_otro_por_factura = {}
+        self._comp_gen_otro_por_factura = {}
 
     # ── Construcción de la UI ────────────────────────────────────────────────
 
@@ -391,6 +394,7 @@ class CruzarRemesasModule:
 
         self._filas_resultado = []
         self._consecutivos_otro_por_factura = {}
+        self._comp_gen_otro_por_factura = {}
         for nf in todas_facturas:
             if nf in grupos_rg.groups:
                 g_rg = grupos_rg.get_group(nf)
@@ -415,12 +419,19 @@ class CruzarRemesasModule:
                 # Consecutivos en el orden en que aparecen en el otro Excel,
                 # para asignarlos en ese mismo orden a las líneas del RG.
                 consecutivos_otro = [self._fmt_consec(v) for v in g_otro[c["otro_col_consec"]]]
+                col_comp_gen = c.get("otro_col_comp_gen", "— No usar —")
+                if col_comp_gen and col_comp_gen != "— No usar —" and col_comp_gen in g_otro.columns:
+                    comp_gen_otro = [str(v) if not pd.isna(v) else "" for v in g_otro[col_comp_gen]]
+                else:
+                    comp_gen_otro = []
             else:
                 n_remesas_otro = 0
                 suma_valor_otro = 0.0
                 consecutivos_otro = []
+                comp_gen_otro = []
 
             self._consecutivos_otro_por_factura[nf] = consecutivos_otro
+            self._comp_gen_otro_por_factura[nf] = comp_gen_otro
 
             coinciden_remesas = (n_remesas_rg == n_remesas_otro) and n_remesas_rg > 0
             coincide_valor = abs(valor_factura_rg - suma_valor_otro) < 1.0 and valor_factura_rg > 0
@@ -515,9 +526,20 @@ class CruzarRemesasModule:
                 lst = self._consecutivos_otro_por_factura.get(nf, [])
                 return lst[pos] if pos < len(lst) else ""
 
+            def _comp_gen_en_pos(nf, pos):
+                lst = self._comp_gen_otro_por_factura.get(nf, [])
+                return lst[pos] if pos < len(lst) else ""
+
             df["Consecutivo Remesa (Otro Excel)"] = [
                 _consecutivo_en_pos(nf, pos) for nf, pos in zip(nf_serie, pos_serie)
             ]
+            # Solo añadir la columna si el usuario la mapeó.
+            # Es informativa: se copian los valores originales del otro Excel tal cual.
+            col_comp_gen = self.vars.get("otro_col_comp_gen")
+            if col_comp_gen and col_comp_gen.get() and col_comp_gen.get() != "— No usar —":
+                df["Comp. Generador Carga RNDC"] = [
+                    _comp_gen_en_pos(nf, pos) for nf, pos in zip(nf_serie, pos_serie)
+                ]
             df["¿Coinciden remesas?"] = nf_serie.map(
                 lambda nf: self._mapa_resultado.get(nf, {}).get("coinciden_remesas", "No"))
             df["¿Coincide valor factura con RG?"] = nf_serie.map(

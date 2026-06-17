@@ -1,4 +1,5 @@
 import re
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from datetime import datetime
@@ -425,6 +426,19 @@ class ExcelLoaderWindow:
                       f"{n_rem} remesas  ·  Perfil: {nombre_perfil}"),
                 fg=SUCCESS)
 
+        def _set_generando(activo):
+            """Bloquea/desbloquea el botón de generar y muestra u oculta la barra."""
+            if activo:
+                _btn_gen.configure(bg=BG3, fg=TEXT2, cursor="")
+                _btn_gen.unbind("<Button-1>")
+                self._prog_frame.pack(fill=tk.X, pady=(6, 0))
+            else:
+                _btn_gen.configure(bg=ACCENT, fg="white", cursor="hand2")
+                _btn_gen.bind("<Button-1>", lambda e: _generar_todos())
+                self._prog_frame.pack_forget()
+                self._prog_bar["value"] = 0
+                self._prog_label.configure(text="")
+
         def _generar_todos():
             ok, msg = self._validar()
             if not ok:
@@ -442,49 +456,71 @@ class ExcelLoaderWindow:
             carpeta = filedialog.askdirectory(title="Selecciona carpeta de destino para los XML")
             if not carpeta:
                 return
-            perfil = self.perfil_fn()   # perfil activo al momento de generar
+            perfil = self.perfil_fn()
             nombre_perfil = perfil["nombre"]
-
-            # ── Consultar radicados faltantes en el RNDC ──────────────────────
             total_rem = sum(len(d["remesas"]) for d in datos_list)
-            if total_rem > 0:
-                if self.on_success:
-                    self.on_success("🔍  Consultando radicados en el RNDC…")
-                consultadas = 0
+            total_pasos = total_rem + len(datos_list)  # consultas RNDC + generaciones XML
+
+            _set_generando(True)
+            self._prog_bar["maximum"] = total_pasos
+            self._prog_label.configure(text="Iniciando…")
+
+            def _progreso(valor, texto):
+                """Actualiza la barra desde el hilo de trabajo de forma thread-safe."""
+                self.win.after(0, lambda: (
+                    self._prog_bar.configure(value=valor),
+                    self._prog_label.configure(text=texto),
+                ))
+
+            def _worker():
+                paso = 0
+                errores = []
+                generados = 0
+
+                # ── Fase 1: consultar radicados faltantes en el RNDC ─────────
                 for datos in datos_list:
                     for rem in datos["remesas"]:
-                        consec  = rem.get("consecutivo", "").strip()
+                        consec = rem.get("consecutivo", "").strip()
                         radicado_actual = rem.get("radicado", "").strip()
-                        # Consultar si el radicado está vacío, es nan o es 0
                         if consec and radicado_actual.lower() in ("", "nan", "none", "0"):
                             ok_r, resultado = consultar_radicado_remesa(consec, perfil)
                             rem["radicado"] = resultado.get("radicado", "0") if ok_r else "0"
                         elif not radicado_actual or radicado_actual.lower() in ("nan", "none"):
                             rem["radicado"] = "0"
-                        consultadas += 1
-            errores = []
-            generados = 0
-            for datos in datos_list:
-                try:
-                    xml = generar_xml(datos, perfil=perfil)
-                    nf  = datos["numero_factura"]
-                    ruta_out = Path(carpeta) / f"FACTURA_{nf}.xml"
-                    with open(ruta_out, "w", encoding="utf-8") as fout:
-                        fout.write(xml)
-                    generados += 1
-                except Exception as e:
-                    errores.append(f"Factura {datos.get('numero_factura','?')}: {e}")
-            msg_ok = (f"✓  {generados} XML generado{'s' if generados!=1 else ''} "
-                      f"[{nombre_perfil}]\n{carpeta}")
-            if errores:
-                msg_ok += "\n\n⚠  Errores:\n" + "\n".join(errores)
-                messagebox.showwarning("Generación parcial", msg_ok)
-            else:
-                messagebox.showinfo("¡Listo!", msg_ok)
-            if self.on_success:
-                self.on_success(
-                    f"✓  {generados} facturas generadas [{nombre_perfil}] → {carpeta}")
-            # La ventana permanece abierta para permitir otro cargue o ajuste
+                        paso += 1
+                        _progreso(paso, f"Consultando RNDC… remesa {paso}/{total_rem}")
+
+                # ── Fase 2: generar XML ───────────────────────────────────────
+                for i, datos in enumerate(datos_list, start=1):
+                    try:
+                        xml = generar_xml(datos, perfil=perfil)
+                        nf = datos["numero_factura"]
+                        ruta_out = Path(carpeta) / f"FACTURA_{nf}.xml"
+                        with open(ruta_out, "w", encoding="utf-8") as fout:
+                            fout.write(xml)
+                        generados += 1
+                    except Exception as e:
+                        errores.append(f"Factura {datos.get('numero_factura', '?')}: {e}")
+                    paso += 1
+                    _progreso(paso, f"Generando XML… {i}/{len(datos_list)}")
+
+                # ── Fin: volver al hilo principal para UI ────────────────────
+                def _fin():
+                    _set_generando(False)
+                    msg_ok = (f"✓  {generados} XML generado{'s' if generados != 1 else ''} "
+                              f"[{nombre_perfil}]\n{carpeta}")
+                    if errores:
+                        msg_ok += "\n\n⚠  Errores:\n" + "\n".join(errores)
+                        messagebox.showwarning("Generación parcial", msg_ok)
+                    else:
+                        messagebox.showinfo("¡Listo!", msg_ok)
+                    if self.on_success:
+                        self.on_success(
+                            f"✓  {generados} facturas generadas [{nombre_perfil}] → {carpeta}")
+
+                self.win.after(0, _fin)
+
+            threading.Thread(target=_worker, daemon=True).start()
 
         # botones
         _btn_prev = tk.Label(btn_row, text="🔍  Vista previa / contar", font=FONT_BODY,
@@ -521,6 +557,20 @@ class ExcelLoaderWindow:
         _btn_limpiar_ex.bind("<Button-1>", lambda e: _limpiar_excel())
         _btn_limpiar_ex.bind("<Enter>",    lambda e: _btn_limpiar_ex.configure(bg="#3a4060"))
         _btn_limpiar_ex.bind("<Leave>",    lambda e: _btn_limpiar_ex.configure(bg="#555e7a"))
+
+        # ── Barra de progreso (oculta hasta que se inicia la generación) ──────
+        self._prog_frame = tk.Frame(body, bg=BG)
+        # No se hace pack aquí; _set_generando lo muestra/oculta dinámicamente
+        s2 = ttk.Style()
+        s2.configure("Gen.Horizontal.TProgressbar",
+                      troughcolor=BG3, background=ACCENT, thickness=14)
+        self._prog_bar = ttk.Progressbar(
+            self._prog_frame, style="Gen.Horizontal.TProgressbar",
+            orient="horizontal", mode="determinate", length=500)
+        self._prog_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        self._prog_label = tk.Label(
+            self._prog_frame, text="", font=FONT_SMALL, bg=BG, fg=TEXT2, width=36, anchor="w")
+        self._prog_label.pack(side=tk.LEFT)
 
         # Tamaño dinámico (solo en modo ventana, no embebido)
         if container is None:
@@ -658,7 +708,15 @@ class ExcelLoaderWindow:
 
             remesas = []
             for _, fila in grupo.iterrows():
-                consec   = str(fila[c_consec]).strip()
+                _cv = fila[c_consec]
+                if pd.isna(_cv):
+                    consec = ""
+                elif isinstance(_cv, float) and _cv.is_integer():
+                    consec = str(int(_cv))
+                else:
+                    consec = str(_cv).strip()
+                    if consec.endswith(".0") and consec[:-2].isdigit():
+                        consec = consec[:-2]
                 radicado = str(fila[c_radicado]).strip() if c_radicado else ""
                 try:
                     valor = _parse_valor(str(fila[c_val_rem]))
