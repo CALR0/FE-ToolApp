@@ -189,6 +189,21 @@ class EditarXMLModule:
         self._lbl_count.pack(side=tk.LEFT, padx=8)
         tk.Label(tr, text="💡 Doble clic para editar",
                  font=FONT_SMALL, bg=BG2, fg=TEXT2).pack(side=tk.RIGHT, padx=4)
+
+        # Botones + / − para añadir/quitar remesas
+        btn_rem = tk.Label(tr, text="  −  ", font=("Segoe UI", 10, "bold"),
+                           bg=DANGER, fg="white", cursor="hand2", padx=6, pady=2)
+        btn_rem.pack(side=tk.RIGHT, padx=(0, 4))
+        btn_rem.bind("<Button-1>", lambda e: self._quitar_remesa())
+        btn_rem.bind("<Enter>", lambda e: btn_rem.configure(bg="#b91c1c"))
+        btn_rem.bind("<Leave>", lambda e: btn_rem.configure(bg=DANGER))
+
+        btn_add = tk.Label(tr, text="  +  ", font=("Segoe UI", 10, "bold"),
+                           bg=SUCCESS, fg="white", cursor="hand2", padx=6, pady=2)
+        btn_add.pack(side=tk.RIGHT, padx=(0, 2))
+        btn_add.bind("<Button-1>", lambda e: self._añadir_remesa())
+        btn_add.bind("<Enter>", lambda e: btn_add.configure(bg="#16a34a"))
+        btn_add.bind("<Leave>", lambda e: btn_add.configure(bg=SUCCESS))
         tk.Frame(rem_outer, bg=BORDER, height=1).pack(fill=tk.X, padx=12, pady=(0, 4))
 
         # Treeview de remesas
@@ -569,6 +584,52 @@ class EditarXMLModule:
         entry.bind("<Escape>",   cancelar)
         entry.bind("<FocusOut>", confirmar)
 
+    # ── Añadir / quitar remesas ──────────────────────────────────────────────
+
+    def _añadir_remesa(self):
+        if not self.ruta_xml:
+            messagebox.showwarning("Sin archivo", "Primero carga un XML.")
+            return
+        nuevo_idx = len(self.remesas)
+        self.remesas.append({
+            "idx":         nuevo_idx,
+            "radicado":    "",
+            "consecutivo": "",
+            "valor":       "",
+            "peso":        "",
+            "descripcion": "",
+            "_nuevo":      True,   # marca para saber que hay que insertar el XML
+        })
+        self._lbl_count.configure(text=f"({len(self.remesas)} remesas)")
+        self._refrescar_tabla()
+        # Seleccionar la nueva fila
+        iid = str(nuevo_idx)
+        self._tree.see(iid)
+        self._tree.selection_set(iid)
+
+    def _quitar_remesa(self):
+        if not self.ruta_xml:
+            return
+        sel = self._tree.selection()
+        if not sel:
+            # Si no hay selección, elimina la última
+            if not self.remesas:
+                return
+            idx_a_borrar = self.remesas[-1]["idx"]
+        else:
+            idx_a_borrar = int(sel[0])
+
+        if len(self.remesas) <= 1:
+            messagebox.showwarning("Mínimo 1", "La factura debe tener al menos una remesa.")
+            return
+
+        self.remesas = [r for r in self.remesas if r["idx"] != idx_a_borrar]
+        # Re-indexar para que idx refleje la posición actual
+        for i, r in enumerate(self.remesas):
+            r["idx"] = i
+        self._lbl_count.configure(text=f"({len(self.remesas)} remesas)")
+        self._refrescar_tabla()
+
     # ── Guardar ───────────────────────────────────────────────────────────────
 
     def _guardar(self):
@@ -583,24 +644,55 @@ class EditarXMLModule:
 
             inv = m_cdata.group(2)
             lineas_orig = re.findall(r"<cac:InvoiceLine.*?</cac:InvoiceLine>", inv, re.DOTALL)
-            inv_nuevo = inv
 
-            for r in self.remesas:
-                if r["idx"] >= len(lineas_orig):
-                    continue
-                linea_orig  = lineas_orig[r["idx"]]
-                linea_nueva = linea_orig
-                # Normalizar valor: acepta 1.777.777,00 / 1,777,777.00 / 1777777 → "1777777"
+            # Plantilla para clonar: siempre el primer InvoiceLine existente en el XML
+            _plantilla_line = lineas_orig[0] if lineas_orig else None
+
+            # Construir lista de InvoiceLines resultado
+            lineas_resultado = []
+            for pos, r in enumerate(self.remesas):
                 try:
                     _val_fmt = _fmt_valor(_parse_valor(r["valor"]))
                 except Exception:
-                    _val_fmt = r["valor"]  # si no parsea, dejar como está
-                linea_nueva = self._set_prop(linea_nueva, "01", r["radicado"])
-                linea_nueva = self._set_prop(linea_nueva, "02", r["consecutivo"])
-                linea_nueva = self._set_prop_03(linea_nueva, _val_fmt, r["peso"])
-                linea_nueva = self._set_invoiced_qty(linea_nueva, r["peso"])
-                linea_nueva = self._set_descripcion(linea_nueva, r.get("descripcion", ""))
-                inv_nuevo   = inv_nuevo.replace(linea_orig, linea_nueva, 1)
+                    _val_fmt = r["valor"]
+
+                if r.get("_nuevo") and _plantilla_line:
+                    # Clonar la plantilla y actualizar el ID de línea
+                    linea = re.sub(
+                        r'(<cbc:ID[^>]*>)\d+(</cbc:ID>)',
+                        rf'\g<1>{pos + 1}\g<2>', _plantilla_line, count=1)
+                    linea = self._set_prop(linea, "01", r["radicado"])
+                    linea = self._set_prop(linea, "02", r["consecutivo"])
+                    linea = self._set_prop_03(linea, _val_fmt or "0", r["peso"] or "0")
+                    linea = self._set_invoiced_qty(linea, r["peso"] or "0")
+                    linea = self._set_descripcion(linea, r.get("descripcion", ""))
+                elif r["idx"] < len(lineas_orig):
+                    linea = lineas_orig[r["idx"]]
+                    # Actualizar ID de línea si la posición cambió (por eliminaciones previas)
+                    linea = re.sub(
+                        r'(<cbc:ID[^>]*>)\d+(</cbc:ID>)',
+                        rf'\g<1>{pos + 1}\g<2>', linea, count=1)
+                    linea = self._set_prop(linea, "01", r["radicado"])
+                    linea = self._set_prop(linea, "02", r["consecutivo"])
+                    linea = self._set_prop_03(linea, _val_fmt, r["peso"])
+                    linea = self._set_invoiced_qty(linea, r["peso"])
+                    linea = self._set_descripcion(linea, r.get("descripcion", ""))
+                else:
+                    continue
+                lineas_resultado.append(linea)
+
+            # Reemplazar el bloque de InvoiceLines en el Invoice
+            if lineas_orig:
+                primer_inicio = inv.find(lineas_orig[0])
+                ultimo_fin    = inv.rfind(lineas_orig[-1]) + len(lineas_orig[-1])
+                inv_nuevo = inv[:primer_inicio] + "\n".join(lineas_resultado) + inv[ultimo_fin:]
+            else:
+                inv_nuevo = inv
+
+            # Actualizar LineCountNumeric
+            inv_nuevo = re.sub(
+                r'(<cbc:LineCountNumeric>)\d+(</cbc:LineCountNumeric>)',
+                rf'\g<1>{len(lineas_resultado)}\g<2>', inv_nuevo)
 
             contenido_nuevo = (
                 self.contenido_xml[: m_cdata.start(2)]
@@ -664,9 +756,9 @@ class EditarXMLModule:
             fecha_nueva = self.var_fecha.get().strip()
             fecha_orig_xml = self._fecha_orig
             fecha_orig_iso = self._fecha_orig_iso
-            if fecha_nueva and fecha_orig_xml and fecha_nueva != fecha_orig_iso:
+            if fecha_nueva and fecha_orig_xml and fecha_nueva != fecha_orig_iso and fecha_nueva != fecha_orig_xml:
                 try:
-                    dt_nueva   = datetime.strptime(fecha_nueva, "%Y-%m-%d")
+                    dt_nueva   = datetime.strptime(self._to_iso(fecha_nueva), "%Y-%m-%d")
                     venc_nueva = (dt_nueva + timedelta(days=30)).strftime("%Y-%m-%d")
                     # IssueDate: reemplaza el valor literal del XML
                     contenido_nuevo = re.sub(
@@ -781,6 +873,10 @@ class EditarXMLModule:
             self._numero_orig    = self.var_numero.get().strip()
             self._cufe_orig      = self.var_cufe.get().strip()
             self._cliente_orig   = self.var_cliente.get().strip()
+            # Limpiar marca _nuevo y sincronizar idx con posición actual
+            for i, r in enumerate(self.remesas):
+                r["idx"] = i
+                r.pop("_nuevo", None)
             _f_guardada          = self.var_fecha.get().strip()
             self._fecha_orig     = _f_guardada
             self._fecha_orig_iso = _f_guardada
