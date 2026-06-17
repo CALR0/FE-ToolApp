@@ -467,3 +467,14 @@ def anular_cumplido_remesa(consecutivo_remesa, cod_motivo, perfil, timeout=20):
         "CODMOTIVOANULACIONCUMPLIDO": str(cod_motivo).strip(),
     }
     return _enviar_proceso_rndc(28, variables, perfil, timeout)
+
+
+def cumplir_remesa(variables, perfil, timeout=20):
+    """
+    Cumple una remesa en el RNDC (proceso 5, tipo 1).
+    `variables` es un dict {nombre: valor} con los campos del cumplido
+    (TIPOCUMPLIDOREMESA, cantidades, tiempos logísticos, etc.).
+    Mismo endpoint (rndcws) y credenciales que corregir/anular.
+    Retorna (ok, {ingresoid}) o (False, mensaje_error).
+    """
+    return _enviar_proceso_rndc(5, variables, perfil, timeout)
