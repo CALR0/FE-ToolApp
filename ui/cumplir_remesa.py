@@ -111,6 +111,11 @@ class CumplirRemesaModule:
         btn.pack(side=tk.LEFT)
         btn.bind("<Button-1>", lambda e: self._consultar())
 
+        btn2 = tk.Label(top, text="📥  Traer tiempos del cumplido", font=FONT_BODY,
+                        bg="#7c3aed", fg="white", cursor="hand2", padx=12, pady=5)
+        btn2.pack(side=tk.LEFT, padx=(8, 0))
+        btn2.bind("<Button-1>", lambda e: self._traer_tiempos_cumplido())
+
         self._lbl_estado = tk.Label(body, text="", font=FONT_BODY, bg=BG,
                                     fg=TEXT2, anchor="w")
         self._lbl_estado.pack(anchor="w", pady=(0, 6))
@@ -261,6 +266,58 @@ class CumplirRemesaModule:
         return variables, errores
 
     # ── Consultar ─────────────────────────────────────────────────────────────
+
+    def _traer_tiempos_cumplido(self):
+        """
+        Consulta el CUMPLIDO actual (proceso 5) y rellena los campos de tiempos
+        con los valores REALES ya registrados. Útil para reutilizarlos cuando se
+        descumple (anular) → corrige → vuelve a cumplir. Deja el módulo listo
+        para guardar (cantidad, tipo y tiempos cargados).
+        IMPORTANTE: hacerlo ANTES de anular el cumplido.
+        """
+        consec = self._consec_efectivo()
+        if not consec:
+            messagebox.showwarning("Sin consecutivo", "Escribe el consecutivo de la remesa.")
+            return
+        if not self.perfil_fn:
+            messagebox.showerror("Sin perfil", "No hay perfil activo.")
+            return
+        perfil = self._perfil()
+
+        self._lbl_estado.configure(text=f"📥 Trayendo tiempos del cumplido de {consec}…", fg=TEXT2)
+        try:
+            self.win.update_idletasks()
+        except Exception:
+            pass
+
+        ok, res = consultar_remesa_completa(consec, perfil, procesoid=5)
+        if not ok:
+            self._lbl_estado.configure(text=f"✗ {res}", fg=DANGER)
+            return
+
+        # Verificar que traiga tiempos reales
+        if not (res.get("fechallegadacargue") or res.get("horallegadacargueremesa")):
+            self._lbl_estado.configure(
+                text="⚠ La remesa no tiene tiempos de cumplido registrados (¿no está cumplida?).",
+                fg=WARNING)
+
+        self._consulta = res
+        self._consultada = True
+        # Ajustar el tipo de cumplido según lo que devuelve el proceso 5
+        tcr = (res.get("tipocumplidoremesa", "") or "").strip().upper()
+        if tcr in ("C", "S"):
+            self.var_tipo.set("C — Cumplido Normal" if tcr == "C" else "S — Suspensión")
+
+        # Volcar los tiempos REALES a los campos editables
+        for _etq, fcampo, hcampo in self.CARGUE_ROWS + self.DESCARGUE_ROWS:
+            self.time_vars[fcampo].set(res.get(fcampo.lower(), ""))
+            self.time_vars[hcampo].set(res.get(hcampo.lower(), ""))
+
+        self._btn_enviar.configure(bg=SUCCESS, fg="white")
+        self._render_campos()
+        self._lbl_estado.configure(
+            text=f"✓ Tiempos del cumplido de {consec} cargados. Puedes anular/corregir y "
+                 f"volver aquí a Guardar (los tiempos se conservan).", fg=SUCCESS)
 
     def _consultar(self):
         consec = self._consec_efectivo()

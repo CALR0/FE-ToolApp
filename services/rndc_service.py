@@ -210,7 +210,7 @@ _RNDC_CONSULTA_FULL_TMPL = """<?xml version='1.0' encoding='ISO-8859-1' ?>
   </acceso>
   <solicitud>
     <tipo>3</tipo>
-    <procesoid>3</procesoid>
+    <procesoid>{procesoid}</procesoid>
   </solicitud>
   <variables>*</variables>
   <documento>
@@ -220,15 +220,18 @@ _RNDC_CONSULTA_FULL_TMPL = """<?xml version='1.0' encoding='ISO-8859-1' ?>
 </root>"""
 
 
-def consultar_remesa_completa(consecutivo_remesa, perfil, timeout=20):
+def consultar_remesa_completa(consecutivo_remesa, perfil, procesoid=3, timeout=20):
     """
-    Consulta TODOS los campos de una remesa (proceso 3, tipo 3, `variables=*`).
-    Pensada para prellenar el módulo de "Corregir Remesa".
+    Consulta TODOS los campos de una remesa con `tipo=3` y `variables=*`.
+
+    procesoid=3 → datos de la remesa (citas pactadas, generador, etc.).
+    procesoid=5 → datos del CUMPLIDO (tiempos logísticos reales ya registrados).
 
     Parámetros:
         consecutivo_remesa : str  — consecutivo de la remesa (tal cual; el caller
                                     aplica prefijo si el perfil lo requiere).
         perfil             : dict — usa rndc_usuario / rndc_password / nit_socio.
+        procesoid          : int  — 3 (remesa) o 5 (cumplido).
         timeout            : int  — segundos de espera.
 
     Retorna:
@@ -246,6 +249,7 @@ def consultar_remesa_completa(consecutivo_remesa, perfil, timeout=20):
     nit_empresa = perfil.get("nit_socio", "")
 
     rndc_xml = _RNDC_CONSULTA_FULL_TMPL.format(
+        procesoid=procesoid,
         usuario=_html.escape(usuario),
         password=_html.escape(password),
         nit_empresa=_html.escape(nit_empresa),
