@@ -31,6 +31,23 @@ class ConsultarRemesasModule:
         self.parent    = parent
         self.perfil_fn = perfil_fn
 
+    # ── Copiar tabla al portapapeles ──────────────────────────────────────────
+
+    @staticmethod
+    def _copiar_tree(win, tree, headers):
+        """Copia el contenido de un Treeview (encabezados + filas) al portapapeles
+        como texto separado por tabulaciones (pegable en Excel)."""
+        filas = [tree.item(i, "values") for i in tree.get_children()]
+        if not filas:
+            messagebox.showinfo("Sin datos", "No hay filas para copiar.")
+            return
+        lineas = ["\t".join(str(h) for h in headers)]
+        for f in filas:
+            lineas.append("\t".join("" if v is None else str(v) for v in f))
+        win.clipboard_clear()
+        win.clipboard_append("\n".join(lineas))
+        messagebox.showinfo("Copiado", f"{len(filas)} fila(s) copiadas al portapapeles.")
+
     # ── Helpers internos ──────────────────────────────────────────────────────
 
     def _campo(self, parent, etiqueta, var, row, col_start=0, ancho=22):
@@ -134,6 +151,11 @@ class ConsultarRemesasModule:
         hist_hdr.pack(fill=tk.X, padx=18)
         tk.Label(hist_hdr, text="Historial de consultas", font=FONT_H2,
                  bg=BG2, fg=TEXT).pack(side=tk.LEFT, padx=12, pady=6)
+        _btn_copiar = tk.Label(hist_hdr, text="📋  Copiar tabla", font=FONT_SMALL,
+                               bg=ACCENT2, fg="white", cursor="hand2", padx=10, pady=3)
+        _btn_copiar.pack(side=tk.RIGHT, padx=12)
+        _btn_copiar.bind("<Button-1>", lambda e: self._copiar_tree(
+            self.win, self._tree, [c[0] for c in self.COLUMNAS]))
         tk.Frame(container, bg=BORDER, height=1).pack(fill=tk.X, padx=18)
 
         self._mk_tree_style("Cons")
@@ -163,7 +185,10 @@ class ConsultarRemesasModule:
 
     # ── Helpers de estado ─────────────────────────────────────────────────────
 
-    def _estado_txt_color(self, cod):
+    def _estado_txt_color(self, cod, manifiesto=""):
+        # AC sin manifiesto asignado → pendiente de asignar manifiesto
+        if cod == "AC" and not str(manifiesto).strip():
+            return "📋 Pendiente de asignar manifiesto", "#fbbf24"
         if cod == "CE":
             return "✓ Cumplida", "#4ade80"
         elif cod == "AC":
@@ -346,6 +371,12 @@ class ConsultarRemesasModule:
         tree_m.tag_configure("warn",  background=BG2, foreground="#fbbf24")
         tree_m.tag_configure("error", background=BG2, foreground="#f87171")
 
+        btn_copiar_m = tk.Label(fila_btns, text="  📋 Copiar tabla  ",
+                                font=FONT_BODY, bg=ACCENT2, fg="white",
+                                cursor="hand2", padx=8, pady=5)
+        btn_copiar_m.pack(side=tk.LEFT)
+        btn_copiar_m.bind("<Button-1>", lambda e: self._copiar_tree(modal, tree_m, cols_m))
+
         resultados = []
 
         def _obtener_consecutivos():
@@ -399,7 +430,7 @@ class ConsultarRemesasModule:
                     destino     = resultado.get("destino", "")
                     manifiesto  = resultado.get("manifiesto", "")
                     cod_est     = resultado.get("estado", "")
-                    estado_txt, _ = self._estado_txt_color(cod_est)
+                    estado_txt, _ = self._estado_txt_color(cod_est, manifiesto)
                     tag = "ok" if cod_est == "CE" else ("warn" if cod_est == "AC" else "ok")
                 else:
                     radicado = peso = propietario = origen = destino = manifiesto = "—"
@@ -481,7 +512,7 @@ class ConsultarRemesasModule:
             destino     = resultado.get("destino", "")
             cod_est     = resultado.get("estado", "")
             manifiesto  = resultado.get("manifiesto", "")
-            estado_txt, color = self._estado_txt_color(cod_est)
+            estado_txt, color = self._estado_txt_color(cod_est, manifiesto)
 
             self._v["radicado"].set(radicado)
             self._v["propietario"].set(propietario)

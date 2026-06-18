@@ -35,6 +35,7 @@ class CruzarRemesasModule:
         ("otro_col_consec",   "Consecutivo / Remesa",         True),
         ("otro_col_val_un",   "Valor unitario remesa",        True),
         ("otro_col_comp_gen", "Comp. Generador Carga RNDC",   False),
+        ("otro_col_novedad",  "Novedad remesa",               False),
     ]
 
     # Opciones de filtro para la exportación. El valor es una función que recibe
@@ -57,6 +58,7 @@ class CruzarRemesasModule:
         "otro_col_consec": ["remesa", "consecutivo", "consec"],
         "otro_col_val_un":   ["valor_unitario", "vr_unitario", "valor_remesa", "val_rem", "vunit"],
         "otro_col_comp_gen": ["comp. generador", "comp_generador", "generador carga", "generadorcarga", "rndc"],
+        "otro_col_novedad":  ["novedad"],
     }
 
     def __init__(self):
@@ -77,6 +79,7 @@ class CruzarRemesasModule:
         self._col_rg_nf = None
         self._consecutivos_otro_por_factura = {}
         self._comp_gen_otro_por_factura = {}
+        self._novedad_otro_por_factura = {}
 
     # ── Construcción de la UI ────────────────────────────────────────────────
 
@@ -395,6 +398,7 @@ class CruzarRemesasModule:
         self._filas_resultado = []
         self._consecutivos_otro_por_factura = {}
         self._comp_gen_otro_por_factura = {}
+        self._novedad_otro_por_factura = {}
         for nf in todas_facturas:
             if nf in grupos_rg.groups:
                 g_rg = grupos_rg.get_group(nf)
@@ -424,14 +428,21 @@ class CruzarRemesasModule:
                     comp_gen_otro = [str(v) if not pd.isna(v) else "" for v in g_otro[col_comp_gen]]
                 else:
                     comp_gen_otro = []
+                col_novedad = c.get("otro_col_novedad", "— No usar —")
+                if col_novedad and col_novedad != "— No usar —" and col_novedad in g_otro.columns:
+                    novedad_otro = [str(v) if not pd.isna(v) else "" for v in g_otro[col_novedad]]
+                else:
+                    novedad_otro = []
             else:
                 n_remesas_otro = 0
                 suma_valor_otro = 0.0
                 consecutivos_otro = []
                 comp_gen_otro = []
+                novedad_otro = []
 
             self._consecutivos_otro_por_factura[nf] = consecutivos_otro
             self._comp_gen_otro_por_factura[nf] = comp_gen_otro
+            self._novedad_otro_por_factura[nf] = novedad_otro
 
             coinciden_remesas = (n_remesas_rg == n_remesas_otro) and n_remesas_rg > 0
             coincide_valor = abs(valor_factura_rg - suma_valor_otro) < 1.0 and valor_factura_rg > 0
@@ -530,6 +541,10 @@ class CruzarRemesasModule:
                 lst = self._comp_gen_otro_por_factura.get(nf, [])
                 return lst[pos] if pos < len(lst) else ""
 
+            def _novedad_en_pos(nf, pos):
+                lst = self._novedad_otro_por_factura.get(nf, [])
+                return lst[pos] if pos < len(lst) else ""
+
             df["Consecutivo Remesa (Otro Excel)"] = [
                 _consecutivo_en_pos(nf, pos) for nf, pos in zip(nf_serie, pos_serie)
             ]
@@ -539,6 +554,11 @@ class CruzarRemesasModule:
             if col_comp_gen and col_comp_gen.get() and col_comp_gen.get() != "— No usar —":
                 df["Comp. Generador Carga RNDC"] = [
                     _comp_gen_en_pos(nf, pos) for nf, pos in zip(nf_serie, pos_serie)
+                ]
+            col_novedad = self.vars.get("otro_col_novedad")
+            if col_novedad and col_novedad.get() and col_novedad.get() != "— No usar —":
+                df["Novedad remesa"] = [
+                    _novedad_en_pos(nf, pos) for nf, pos in zip(nf_serie, pos_serie)
                 ]
             df["¿Coinciden remesas?"] = nf_serie.map(
                 lambda nf: self._mapa_resultado.get(nf, {}).get("coinciden_remesas", "No"))

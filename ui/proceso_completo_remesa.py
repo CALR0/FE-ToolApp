@@ -125,6 +125,11 @@ class ProcesoCompletoRemesaModule:
         self._btn.pack(side=tk.LEFT)
         self._btn.bind("<Button-1>", lambda e: self._ejecutar())
 
+        _btn_limpiar = tk.Label(btn_row, text="🗑  Limpiar", font=FONT_BODY,
+                                bg="#555e7a", fg="white", cursor="hand2", padx=12, pady=8)
+        _btn_limpiar.pack(side=tk.LEFT, padx=(8, 0))
+        _btn_limpiar.bind("<Button-1>", lambda e: self._limpiar())
+
         # ── Log ────────────────────────────────────────────────────────────────
         logcard = tk.Frame(body, bg=BG2)
         logcard.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
@@ -154,6 +159,15 @@ class ProcesoCompletoRemesaModule:
             self.win.update_idletasks()
         except Exception:
             pass
+
+    def _limpiar(self):
+        self.var_consec.set("")
+        self.var_nit.set(self.NITS_GENERADOR[0])
+        self.var_sede.set("1")
+        self.var_tipoid.set(self.TIPOID[0])
+        self.var_mot_anul.set(self.MOTIVOS_ANULACION[0])
+        self.var_mot_camb.set(self.MOTIVOS_CAMBIO[0])
+        self._limpiar_log()
 
     def _limpiar_log(self):
         self._log.configure(state="normal")
@@ -226,9 +240,9 @@ class ProcesoCompletoRemesaModule:
         if not messagebox.askyesno(
                 "Confirmar proceso completo",
                 f"¿Ejecutar TODO el proceso para la remesa {consec}?\n\n"
-                f"1. Anular cumplido (motivo {cod_anul})\n"
+                f"1. Anular cumplido (si estaba cumplida, motivo {cod_anul})\n"
                 f"2. Cambiar generador → NIT {nit_nuevo} (sede {sede}, motivo {cod_camb})\n"
-                f"3. Volver a cumplir\n\n"
+                f"3. Volver a cumplir (si la remesa tiene manifiesto y datos)\n\n"
                 "Son operaciones reales en el RNDC y NO se pueden deshacer."):
             return
 
@@ -252,14 +266,24 @@ class ProcesoCompletoRemesaModule:
             return
         self._put("   ✓ Remesa consultada.", "ok")
 
-        # Decidir el plan de cumplido AHORA (antes de anular)
-        tipo, times, desc_plan = self._plan_cumplido(res5, res3)
-        if tipo is None:
-            self._put(f"   ✗ {desc_plan}. Proceso abortado (no se podría re-cumplir).", "err")
-            return
-        self._put(f"   → Re-cumplido planeado: {desc_plan}", "info")
-
+        # Estado de la remesa: ¿tiene manifiesto asignado? ¿estaba cumplida?
+        manifiesto      = str(res3.get("nummanifiestocarga", "")).strip()
         estaba_cumplida = bool(res5.get("fechallegadacargue"))
+        sin_manifiesto  = not manifiesto
+
+        # Decidir el plan de cumplido AHORA (antes de anular). NO se aborta si no
+        # se puede cumplir: el objetivo principal es CORREGIR el generador.
+        tipo, times, desc_plan = self._plan_cumplido(res5, res3)
+        if sin_manifiesto:
+            puede_cumplir = False
+            self._put("   → Remesa PENDIENTE DE ASIGNAR MANIFIESTO: se omitirá el "
+                      "cumplido (no es posible sin manifiesto).", "info")
+        elif tipo is None:
+            puede_cumplir = False
+            self._put(f"   → {desc_plan}: se omitirá el cumplido.", "info")
+        else:
+            puede_cumplir = True
+            self._put(f"   → Re-cumplido planeado: {desc_plan}", "info")
 
         # 3. Anular cumplido (proceso 28) si estaba cumplida
         if estaba_cumplida:
@@ -292,7 +316,17 @@ class ProcesoCompletoRemesaModule:
             return
         self._put(f"   ✓ Generador cambiado (radicado {resC.get('ingresoid','?')}).", "ok")
 
-        # 5. Re-cumplir (proceso 5)
+        # 5. Re-cumplir (proceso 5) — solo si es posible
+        if not puede_cumplir:
+            motivo = ("la remesa no tiene manifiesto asignado"
+                      if sin_manifiesto else "no hay tiempos ni citas")
+            self._put(f"5) Cumplido OMITIDO: {motivo}.", "info")
+            self._put("✔ PROCESO FINALIZADO: generador cambiado (sin cumplido).", "ok")
+            messagebox.showinfo("Proceso completo",
+                f"Remesa {consec}:\n• Generador → {nit_nuevo}\n"
+                f"• Cumplido omitido ({motivo}).")
+            return
+
         self._put(f"5) Re-cumpliendo remesa ({desc_plan})…")
         cant = res3.get("cantidadcargada", "") or res5.get("cantidadcargada", "") \
             or res3.get("cantidadinformacioncarga", "")

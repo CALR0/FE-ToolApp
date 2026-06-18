@@ -34,6 +34,7 @@ class ExcelLoaderWindow:
     FILTROS_GEN = [
         "Todas (sin filtro)",
         "Solo Reconstruir = Sí",
+        "Reconstruir = Sí y Novedad vacía",
         "Coinciden remesas, NO coincide valor",
         "Coincide valor, NO coinciden remesas",
         "NO coinciden remesas",
@@ -54,6 +55,7 @@ class ExcelLoaderWindow:
         ("col_desc_lin",  "Descripción línea remesa",  False, "Servicio de transporte"),
         ("col_nit_cli",   "NIT cliente (opcional)",    False, "Usa 'Datos del Cliente'. El dígito = último número del NIT"),
         ("col_nom_cli",   "Nombre cliente (opcional)", False, "Usa 'Datos del Cliente'"),
+        ("col_novedad",   "Novedad remesa (opcional)", False, "Solo se usa para el filtro 'Reconstruir=Sí y Novedad vacía'"),
     ]
 
     def __init__(self, parent, perfil_fn, on_success, max_facturas=200):
@@ -158,6 +160,7 @@ class ExcelLoaderWindow:
                     "col_desc_lin": ["descripcion", "desc", "descripcion_linea"],
                     "col_nit_cli":  ["nit"],
                     "col_nom_cli":  ["nombre_cliente", "nombre cli", "nom_cli", "cliente"],
+                    "col_novedad":  ["novedad"],
                 }
                 if any(h in col_norm for h in hints.get(clave, [])) \
                    and not (clave == "col_nit_cli" and "unitar" in col_norm):
@@ -314,6 +317,7 @@ class ExcelLoaderWindow:
                         "col_desc_lin": ["descripcion", "desc", "descripcion_linea"],
                         "col_nit_cli":  ["nit"],
                         "col_nom_cli":  ["nombre_cliente", "nombre cli", "nom_cli", "cliente"],
+                        "col_novedad":  ["novedad"],
                     }
                     if any(h in col_norm for h in hints.get(clave, [])) \
                        and not (clave == "col_nit_cli" and "unitar" in col_norm):
@@ -608,14 +612,42 @@ class ExcelLoaderWindow:
             return {"rem": rem, "val": val, "rec": rec}
         return None
 
+    @staticmethod
+    def _col_novedad(df):
+        """Localiza la columna 'Novedad remesa' en el DataFrame (o None)."""
+        if df is None:
+            return None
+        for col in df.columns.astype(str):
+            if "novedad" in col.lower():
+                return col
+        return None
+
+    @staticmethod
+    def _es_vacio(v):
+        """True si la celda está vacía (None/NaN/''/'nan')."""
+        s = str(v).strip().lower()
+        return s in ("", "nan", "none")
+
+    def _novedad_col_activa(self, df):
+        """Columna de novedad a usar en el filtro: la mapeada por el usuario
+        (col_novedad) si la eligió; si no, la auto-detectada por nombre."""
+        v = self.vars.get("col_novedad")
+        if v and v.get() and v.get() != "— No usar —":
+            return v.get()
+        return self._col_novedad(df)
+
+    # Filtros que además exigen la columna 'Novedad remesa'
+    FILTROS_NOVEDAD = {"Reconstruir = Sí y Novedad vacía"}
+
     @classmethod
-    def _pasa_filtro(cls, filtro, rem, val, rec):
+    def _pasa_filtro(cls, filtro, rem, val, rec, novedad=""):
         """True si una fila con esas banderas debe incluirse según el filtro."""
         r = cls._es_si(rem)
         v = cls._es_si(val)
         x = cls._es_si(rec)
         if filtro == "Todas (sin filtro)":                      return True
         if filtro == "Solo Reconstruir = Sí":                   return x
+        if filtro == "Reconstruir = Sí y Novedad vacía":        return x and cls._es_vacio(novedad)
         if filtro == "Coinciden remesas, NO coincide valor":    return r and not v
         if filtro == "Coincide valor, NO coinciden remesas":    return v and not r
         if filtro == "NO coinciden remesas":                    return not r
@@ -638,6 +670,11 @@ class ExcelLoaderWindow:
                            "(¿Coinciden remesas?, ¿Coincide valor factura con RG?, Reconstruir). "
                            "El Excel cargado no las tiene: usa 'Todas (sin filtro)' o carga el "
                            "Excel generado por el módulo de cruce de remesas.")
+        # El filtro de novedad además exige la columna 'Novedad remesa'
+        if filtro in self.FILTROS_NOVEDAD and self._novedad_col_activa(self.df_raw) is None:
+            return False, ("El filtro 'Reconstruir = Sí y Novedad vacía' necesita la columna "
+                           "'Novedad remesa'. El Excel cargado no la tiene: mapéala al cruzar "
+                           "remesas o usa otro filtro.")
         return True, ""
 
     # ── Parseo del DataFrame → lista de datos por factura ────────────────────
@@ -654,9 +691,11 @@ class ExcelLoaderWindow:
         if filtro != "Todas (sin filtro)":
             cc = self._cols_cruce(df)
             if cc is not None:
+                nov_col = self._novedad_col_activa(df)
+                nov_serie = df[nov_col] if nov_col and nov_col in df.columns else [""] * len(df)
                 mask = [
-                    self._pasa_filtro(filtro, r, v, x)
-                    for r, v, x in zip(df[cc["rem"]], df[cc["val"]], df[cc["rec"]])
+                    self._pasa_filtro(filtro, r, v, x, n)
+                    for r, v, x, n in zip(df[cc["rem"]], df[cc["val"]], df[cc["rec"]], nov_serie)
                 ]
                 df = df[mask]
 

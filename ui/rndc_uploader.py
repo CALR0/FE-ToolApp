@@ -13,6 +13,7 @@ from config.theme import (
     TEXT, TEXT2, BORDER, FONT_H1, FONT_H2, FONT_BODY, FONT_SMALL,
 )
 from utils.helpers import resource_path
+from services.rndc_service import consultar_radicado_remesa
 
 
 class RndcUploaderWindow:
@@ -413,11 +414,11 @@ class RndcUploaderWindow:
             return btn
 
         _fac_ref  = [None]
-        _fac_cols = [("Archivo XML", "N° Factura", "Cliente", "CUFE", "Estado RNDC")]
+        _fac_cols = [("Archivo XML", "N° Factura", "Cliente", "CUFE", "Remesas", "Estado RNDC")]
         _mk_copy_btn(hdr_fac, _fac_ref, _fac_cols, None)
 
-        cols_fac = ("Archivo XML", "N° Factura", "Cliente", "CUFE", "Estado RNDC")
-        self._tree_fac = _make_table(body, cols_fac, [120, 75, 160, 145, 600], height=4)
+        cols_fac = ("Archivo XML", "N° Factura", "Cliente", "CUFE", "Remesas", "Estado RNDC")
+        self._tree_fac = _make_table(body, cols_fac, [120, 75, 160, 145, 70, 560], height=4)
         _fac_ref[0] = self._tree_fac
 
         hdr_rem = tk.Frame(body, bg=BG)
@@ -513,11 +514,12 @@ class RndcUploaderWindow:
                 fac_iid = f"fac::{nombre}"
                 self._cufe_map[fac_iid] = cufe
                 self._tree_fac.insert("", "end",
-                    values=(nombre, nf, cliente, cufe_short, "⏳ Pendiente de envío"),
+                    values=(nombre, nf, cliente, cufe_short, "0", "⏳ Pendiente de envío"),
                     tags=("pend",), iid=fac_iid)
                 n_fac = len(self._tree_fac.get_children())
                 self._lbl_fac_count.configure(text=f"({n_fac})")
 
+                n_rem_fac = 0   # remesas de ESTA factura
                 invoice_xml = self._extraer_invoice_xml(root_el, contenido_bytes)
                 if invoice_xml:
                     try:
@@ -560,13 +562,66 @@ class RndcUploaderWindow:
                                 tags=(tag_fila,))
                             n_rem = len(self._tree_rem.get_children())
                             self._lbl_rem_count.configure(text=f"({n_rem})")
+                            n_rem_fac += 1
                     except Exception:
                         pass
 
+                # Actualizar el conteo de remesas de la factura
+                if self._tree_fac.exists(fac_iid):
+                    vf = list(self._tree_fac.item(fac_iid, "values"))
+                    vf[4] = str(n_rem_fac)
+                    self._tree_fac.item(fac_iid, values=vf)
+
             except ET.ParseError as e:
                 self._tree_fac.insert("", "end",
-                    values=(nombre, "—", "—", "—", f"⚠ XML inválido: {e}"),
+                    values=(nombre, "—", "—", "—", "—", f"⚠ XML inválido: {e}"),
                     tags=("err",))
+
+        # ── Consultar el estado actual de cada remesa en el RNDC (antes de enviar) ──
+        self._consultar_estados_remesas()
+
+    # ── Estado de remesa (igual criterio que Consultar Remesas) ────────────────
+
+    @staticmethod
+    def _estado_remesa_txt(cod, manifiesto=""):
+        if cod == "AC" and not str(manifiesto).strip():
+            return "📋 Pendiente de asignar manifiesto"
+        if cod == "CE":
+            return "✓ Cumplida"
+        if cod == "AC":
+            return "⏳ Pendiente por cumplir"
+        return cod or "—"
+
+    def _consultar_estados_remesas(self):
+        """Consulta en el RNDC el estado actual de cada remesa cargada y lo
+        muestra en la columna 'Estado RNDC' (antes del envío de la factura)."""
+        perfil = self.perfil_fn() if self.perfil_fn else None
+        if not perfil:
+            return
+        filas = self._tree_rem.get_children()
+        total = len(filas)
+        for i, item_id in enumerate(filas, 1):
+            vals = list(self._tree_rem.item(item_id, "values"))
+            consec = str(vals[1]).strip()
+            if not consec:
+                continue
+            self._lbl_rem_count.configure(text=f"(consultando {i}/{total}…)")
+            try:
+                self.win.update_idletasks()
+            except Exception:
+                pass
+            try:
+                ok, res = consultar_radicado_remesa(consec, perfil)
+            except Exception:
+                ok, res = False, {}
+            if ok:
+                estado = self._estado_remesa_txt(res.get("estado", ""), res.get("manifiesto", ""))
+                # Completar radicado si vino vacío del XML
+                if (not str(vals[2]).strip() or str(vals[2]).strip() in ("0", "—")) and res.get("radicado"):
+                    vals[2] = res.get("radicado")
+                vals[5] = estado
+                self._tree_rem.item(item_id, values=vals)
+        self._lbl_rem_count.configure(text=f"({total})")
 
     def _xml_text(self, root, paths, ns):
         for p in paths:
@@ -634,8 +689,9 @@ class RndcUploaderWindow:
             fac_id = f"fac::{nombre}"
             if self._tree_fac.exists(fac_id):
                 vals = self._tree_fac.item(fac_id, "values")
+                # vals[4] = nº de remesas de la factura (se conserva)
                 self._tree_fac.item(fac_id,
-                    values=(vals[0], vals[1], vals[2], vals[3], f"{icono} {mensaje}"),
+                    values=(vals[0], vals[1], vals[2], vals[3], vals[4], f"{icono} {mensaje}"),
                     tags=(tag,))
 
             if exito:

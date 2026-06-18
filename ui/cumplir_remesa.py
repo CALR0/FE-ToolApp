@@ -158,6 +158,24 @@ class CumplirRemesaModule:
         self._btn_enviar.pack(side=tk.RIGHT)
         self._btn_enviar.bind("<Button-1>", lambda e: self._enviar())
 
+        btn_limpiar = tk.Label(pie, text="🗑  Limpiar", font=FONT_BODY,
+                               bg="#555e7a", fg="white", cursor="hand2", padx=12, pady=7)
+        btn_limpiar.pack(side=tk.RIGHT, padx=(0, 8))
+        btn_limpiar.bind("<Button-1>", lambda e: self._limpiar())
+
+    def _limpiar(self):
+        self.var_consec.set("")
+        self._consulta = {}
+        self._consultada = False
+        self.var_tipo.set(self.TIPOS[0])
+        for v in self.time_vars.values():
+            v.set("")
+        for w in self._form.winfo_children():
+            w.destroy()
+        self._lbl_cant.configure(text="")
+        self._btn_enviar.configure(bg=BG3, fg=TEXT2)
+        self._lbl_estado.configure(text="", fg=TEXT2)
+
     # ── Cálculo de variables ───────────────────────────────────────────────────
 
     def _tipo_codigo(self):

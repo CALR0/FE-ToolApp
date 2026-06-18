@@ -215,7 +215,26 @@ class CorregirRemesaModule:
         self._btn_enviar.pack(side=tk.RIGHT)
         self._btn_enviar.bind("<Button-1>", lambda e: self._enviar())
 
+        btn_limpiar = tk.Label(pie, text="🗑  Limpiar", font=FONT_BODY,
+                               bg="#555e7a", fg="white", cursor="hand2", padx=12, pady=7)
+        btn_limpiar.pack(side=tk.RIGHT, padx=(0, 8))
+        btn_limpiar.bind("<Button-1>", lambda e: self._limpiar())
+
         self._on_opcion_change()   # render inicial de campos dinámicos
+
+    def _limpiar(self):
+        self.var_consec.set("")
+        self._consulta = {}
+        self._consultada = False
+        for v in self.vars.values():
+            v.set("")
+        for lbl in self._ctx_labels.values():
+            lbl.configure(text="—")
+        self.var_opcion.set(self.OPCIONES[0])
+        self.var_motivo.set(self.MOTIVOS[0])
+        self._on_opcion_change()
+        self._btn_enviar.configure(bg=BG3, fg=TEXT2)
+        self._lbl_estado.configure(text="", fg=TEXT2)
 
     # ── Campos dinámicos por opción ───────────────────────────────────────────
 

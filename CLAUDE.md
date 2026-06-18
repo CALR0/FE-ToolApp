@@ -76,6 +76,8 @@ main.py          → importa de ui/
 
 ## Módulos UI — qué hace cada uno
 
+> Convenciones de UI comunes: los módulos con tabla (`consultar_remesas` incl. modal masivo, `editar_xml`, `rndc_uploader`) tienen botón **"📋 Copiar tabla"** que vuelca encabezados+filas al portapapeles como TSV (pegable en Excel). Los módulos de remesa RNDC (`corregir_remesa`, `anular_cumplido_remesa`, `cumplir_remesa`, `proceso_completo_remesa`) tienen botón **"🗑 Limpiar"** que resetea consecutivo, campos, combos a default y estado.
+
 ### `ui/app.py` — GeneradorApp
 Ventana principal. Construye:
 - **Header** con logo FE-Tool
@@ -91,14 +93,17 @@ Carga un archivo Excel (con **selector de hoja**), mapea columnas a campos de fa
 
 Mapeo **opcional de cliente por columna**: campos `NIT cliente` y `Nombre cliente`. Si se mapean, cada factura usa su propio NIT/nombre del Excel; **el dígito de verificación se toma del último dígito del NIT** (ej. `8000213085` → NIT `800021308`, dígito `5`, limpiando cualquier formato). Si no se mapean, usa los valores fijos de la sección "Datos del Cliente". Auto-mapea las columnas `nit`/`nombre_cliente` que exporta `extraer_datos_rg.py` (con guard para que `nit` no colisione con `valor_unitario`).
 
-**Filtro de generación** (`FILTROS_GEN`): combobox que permite generar solo un subconjunto cuando el Excel trae las columnas de validación del cruce (`¿Coinciden remesas?`, `¿Coincide valor factura con RG?`, `Reconstruir`). Opciones: Todas / Solo Reconstruir=Sí / Coinciden remesas NO valor / Coincide valor NO remesas / NO coinciden remesas / NO coincide valor. Es **opcional**: por defecto "Todas (sin filtro)" y funciona con cualquier Excel normal; solo si se elige un filtro y faltan esas columnas, avisa y no genera (helpers `_cols_cruce`, `_pasa_filtro`, `_es_si`).
+**Filtro de generación** (`FILTROS_GEN`): combobox que permite generar solo un subconjunto cuando el Excel trae las columnas de validación del cruce (`¿Coinciden remesas?`, `¿Coincide valor factura con RG?`, `Reconstruir`). Opciones: Todas / Solo Reconstruir=Sí / **Reconstruir=Sí y Novedad vacía** / Coinciden remesas NO valor / Coincide valor NO remesas / NO coinciden remesas / NO coincide valor. Es **opcional**: por defecto "Todas (sin filtro)" y funciona con cualquier Excel normal; solo si se elige un filtro y faltan esas columnas, avisa y no genera (helpers `_cols_cruce`, `_pasa_filtro`, `_es_si`). El filtro **"Reconstruir=Sí y Novedad vacía"** además exige la columna `Novedad remesa` y solo genera filas con Reconstruir=Sí cuya `Novedad remesa` esté vacía (`_es_vacio`). La columna de novedad es un **campo de mapeo opcional** (`col_novedad`, "Novedad remesa (opcional)") que NO se usa para el XML, solo para este filtro; `_novedad_col_activa` usa la columna mapeada por el usuario si la eligió, o cae a auto-detección por nombre (`_col_novedad`). Conjunto `FILTROS_NOVEDAD`.
 
 **Consecutivos sin `.0`**: en `_parsear()`, al leer la columna de consecutivo/remesa se aplica limpieza explícita de float entero (pandas lee enteros como `float64` → `"11519464.0"`). Lógica: si `isinstance(v, float) and v.is_integer()` → `str(int(v))`; si el string termina en `.0` y el resto es dígitos → se recorta. Esto es crítico cuando el Excel de entrada viene del módulo de cruce de remesas.
 
 **Radicados automáticos**: en `_generar_todos()`, antes de generar los XML se itera cada remesa y si el radicado viene vacío, `"nan"`, `"none"` o `"0"`, se llama a `consultar_radicado_remesa(consec, perfil)` contra el RNDC. El radicado se llena automáticamente; si la consulta falla queda `"0"`. Solo funciona si el consecutivo está bien formateado (garantizado por la limpieza anterior).
 
 ### `ui/rndc_uploader.py` — RndcUploaderWindow
-Sube archivos XML al portal web del RNDC mediante requests HTTP. Registra logs en `rndc_debug.log` en la raíz del proyecto.
+Sube archivos XML (Factura Electrónica, proceso 86) al RNDC mediante SOAP. Registra logs en `rndc_debug.log`. Dos tablas: **Facturas** (con columna **"Remesas"** = cantidad de remesas de cada factura, que se conserva tras el envío junto al radicado/estado) y **Remesas**. Al cargar el XML, **consulta el estado real de cada remesa** en el RNDC (`_consultar_estados_remesas` → `consultar_radicado_remesa`) y lo muestra en "Estado RNDC" antes del envío, con el criterio **"Pendiente de asignar manifiesto"** (estado `AC` sin `nummanifiestocarga`); al enviar, esa columna pasa a mostrar el resultado del envío. Helper `_estado_remesa_txt` (mismo criterio que ConsultarRemesasModule).
+
+### `ui/consultar_remesas.py` — criterio de estado
+`_estado_txt_color(cod, manifiesto)`: si `cod == "AC"` y el manifiesto viene vacío → **"Pendiente de asignar manifiesto"**; `CE` → Cumplida; `AC` con manifiesto → Pendiente por cumplir.
 
 ### `ui/consultar_remesas.py` — ConsultarRemesasModule
 Interfaz para consultar remesas individuales o en lote al RNDC SOAP WS. Muestra consecutivo, radicado, peso, **N° Manifiesto** (`nummanifiestocarga`), propietario, origen, destino y estado.
@@ -143,7 +148,7 @@ Valores monetarios robustos vía `_to_num` (quita `$`, espacios y separadores an
 
 Al exportar, parte del Excel de RG **completo** (todas sus columnas/filas originales, sin la columna `consecutivo_remesa` que se descarta por venir vacía) y le anexa las 3 columnas de validación más `Consecutivo Remesa (Otro Excel)` — este último se asigna **posicionalmente** (línea N del RG ↔ remesa N del otro Excel, en orden de aparición); si el otro Excel tiene menos remesas que líneas el RG, las líneas sobrantes quedan vacías; si tiene **más**, los consecutivos sobrantes no se muestran. (No es un cruce por valor, es por orden de aparición.)
 
-**Columna opcional `Comp. Generador Carga RNDC`** (`otro_col_comp_gen`): campo opcional del otro Excel. Si se mapea en la UI, sus valores se recogen en `_comp_gen_otro_por_factura` (por factura, en orden posicional) y el Excel exportado incluye la columna `"Comp. Generador Carga RNDC"` alineada a cada remesa del RG. Si no se mapea, la columna no aparece en el reporte. Auto-detección por hints: `"comp. generador"`, `"comp_generador"`, `"generador carga"`, `"generadorcarga"`, `"rndc"`.
+**Columnas opcionales del otro Excel** (`otro_col_comp_gen` → `"Comp. Generador Carga RNDC"`; `otro_col_novedad` → `"Novedad remesa"`): campos opcionales del otro Excel. Si se mapean en la UI, sus valores se recogen por factura en orden posicional (`_comp_gen_otro_por_factura`, `_novedad_otro_por_factura`) y el Excel exportado incluye esas columnas alineadas a cada remesa del RG. Si no se mapean, no aparecen en el reporte. Auto-detección por hints: comp. generador → `"comp. generador"`, `"generador carga"`, `"rndc"`, etc.; novedad → `"novedad"`.
 
 > Nota sobre conteos: como `¿Coinciden remesas?` cuenta **filas**, si el otro Excel trae remesas duplicadas o filas con consecutivo en blanco, el conteo puede no cuadrar con los consecutivos únicos visibles.
 
@@ -194,6 +199,8 @@ Nombres de variables del proceso 5: `TIPOCUMPLIDOREMESA` (`C`/`S`), `CANTIDADINF
 5. Re-cumplir (proceso 5).
 
 **Árbol de re-cumplido** (`_plan_cumplido`): si el proceso 5 trae tiempos reales → Normal (cargue+descargue) o Suspensión (solo cargue); si no, calcula de citas (proceso 3) → Normal si hay cita cargue+descargue, Suspensión si solo cargue.
+
+**Cumplido condicional (no aborta):** el objetivo principal es **corregir el generador**, así que el corregir SIEMPRE se intenta. El cumplido (paso 5) se **omite con gracia** cuando no es posible: si la remesa está **Pendiente de asignar manifiesto** (`nummanifiestocarga` vacío en proceso 3 → `sin_manifiesto`), o si no hay tiempos ni citas (`_plan_cumplido` devuelve None). En esos casos corrige y termina informando que el cumplido quedó omitido.
 
 **Sin rollback**: si un paso falla, **se detiene** y el log indica en qué punto quedó (para terminar a mano con los módulos paso-a-paso). **Reutiliza** funciones de servicio y constantes (`CorregirRemesaModule.BASE_FIELDS`, `CumplirRemesaModule.CARGUE_ROWS/DESCARGUE_ROWS/_fecha_hora_mas`) sin modificar esos módulos.
 

@@ -190,6 +190,12 @@ class EditarXMLModule:
         tk.Label(tr, text="💡 Doble clic para editar",
                  font=FONT_SMALL, bg=BG2, fg=TEXT2).pack(side=tk.RIGHT, padx=4)
 
+        # Botón copiar tabla
+        btn_copiar = tk.Label(tr, text="📋 Copiar tabla", font=FONT_SMALL,
+                              bg=ACCENT2, fg="white", cursor="hand2", padx=8, pady=2)
+        btn_copiar.pack(side=tk.RIGHT, padx=(8, 4))
+        btn_copiar.bind("<Button-1>", lambda e: self._copiar_tabla())
+
         # Botones + / − para añadir/quitar remesas
         btn_rem = tk.Label(tr, text="  −  ", font=("Segoe UI", 10, "bold"),
                            bg=DANGER, fg="white", cursor="hand2", padx=6, pady=2)
@@ -518,6 +524,22 @@ class EditarXMLModule:
             self._lbl_vencimiento.configure(text="fecha inválida", fg=DANGER)
 
     # ── Tabla ─────────────────────────────────────────────────────────────────
+
+    def _copiar_tabla(self):
+        """Copia la tabla de remesas (encabezados + filas) al portapapeles como
+        texto separado por tabulaciones (pegable en Excel)."""
+        filas = self._tree.get_children()
+        if not filas:
+            messagebox.showinfo("Sin datos", "No hay remesas para copiar.")
+            return
+        headers = [c[0] for c in self.COLUMNAS]
+        lineas = ["\t".join(headers)]
+        for i in filas:
+            vals = self._tree.item(i, "values")
+            lineas.append("\t".join("" if v is None else str(v) for v in vals))
+        self.win.clipboard_clear()
+        self.win.clipboard_append("\n".join(lineas))
+        messagebox.showinfo("Copiado", f"{len(filas)} remesa(s) copiadas al portapapeles.")
 
     def _refrescar_tabla(self):
         for row in self._tree.get_children():
