@@ -23,6 +23,7 @@ from ui.cruzar_remesas import CruzarRemesasModule
 from ui.corregir_remesa import CorregirRemesaModule
 from ui.anular_cumplido_remesa import AnularCumplidoRemesaModule
 from ui.cumplir_remesa import CumplirRemesaModule
+from ui.proceso_completo_remesa import ProcesoCompletoRemesaModule
 
 
 class GeneradorApp:
@@ -260,6 +261,7 @@ class GeneradorApp:
         _mk_rem_sub_btn("corregir_remesa", "🛠", "Corregir remesa")
         _mk_rem_sub_btn("anular_cumplido", "🗑", "Anular cumplido remesa")
         _mk_rem_sub_btn("cumplir_remesa", "✅", "Cumplir remesa")
+        _mk_rem_sub_btn("proceso_completo", "⚡", "Auto cambio-generador")
 
         def _toggle_remesas(e=None):
             if _rem_expanded.get():
@@ -378,7 +380,7 @@ class GeneradorApp:
                     _fac_expanded.set(True)
                     _grp_arr.configure(text="▼")
             # Expandir el grupo Remesas automáticamente si estaba cerrado
-            if key in ("consultar_remesas", "corregir_remesa", "anular_cumplido", "cumplir_remesa"):
+            if key in ("consultar_remesas", "corregir_remesa", "anular_cumplido", "cumplir_remesa", "proceso_completo"):
                 if not _rem_expanded.get():
                     _rem_sub_frame.pack(fill=tk.X, after=_rem_grp_frm)
                     _rem_expanded.set(True)
@@ -402,7 +404,8 @@ class GeneradorApp:
         self._nav_activate["cumplir_remesa"]      = lambda: _show_panel("cumplir_remesa")
         self._nav_activate["extraer_rg"]          = lambda: _show_panel("extraer_rg")
         self._nav_activate["cruzar_remesas"]      = lambda: _show_panel("cruzar_remesas")
-        for key in ("generar","excel","rndc","editar","reconstruir","consultar_remesas","corregir_remesa","anular_cumplido","cumplir_remesa","extraer_rg","cruzar_remesas"):
+        self._nav_activate["proceso_completo"]    = lambda: _show_panel("proceso_completo")
+        for key in ("generar","excel","rndc","editar","reconstruir","consultar_remesas","corregir_remesa","anular_cumplido","cumplir_remesa","extraer_rg","cruzar_remesas","proceso_completo"):
             frm, ic, lbl = self._nav_buttons[key]
             act = self._nav_activate[key]
             for w in (frm, ic, lbl):
@@ -690,6 +693,26 @@ class GeneradorApp:
         _cv_cu.bind("<Leave>", lambda e: _cv_cu.unbind_all("<MouseWheel>"))
         self._cumplir_remesa_module = CumplirRemesaModule(perfil_fn=self._perfil_activo)
         self._cumplir_remesa_module._build(container=_inner_cu)
+
+        # ─── Panel 12: Proceso completo remesa (orquestador) ───────────────────
+        panel_pc = tk.Frame(content_area, bg=BG)
+        self._nav_panels["proceso_completo"] = panel_pc
+        _wrap_pc = tk.Frame(panel_pc, bg=BG)
+        _wrap_pc.pack(fill=tk.BOTH, expand=True)
+        _cv_pc = tk.Canvas(_wrap_pc, bg=BG, highlightthickness=0)
+        _sb_pc = ttk.Scrollbar(_wrap_pc, orient="vertical", command=_cv_pc.yview)
+        _cv_pc.configure(yscrollcommand=_sb_pc.set)
+        _sb_pc.pack(side=tk.RIGHT, fill=tk.Y)
+        _cv_pc.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        _inner_pc = tk.Frame(_cv_pc, bg=BG)
+        _cwin_pc = _cv_pc.create_window((0, 0), window=_inner_pc, anchor="nw")
+        _inner_pc.bind("<Configure>", lambda e: _cv_pc.configure(scrollregion=_cv_pc.bbox("all")))
+        _cv_pc.bind("<Configure>", lambda e: _cv_pc.itemconfig(_cwin_pc, width=e.width))
+        _cv_pc.bind("<Enter>", lambda e: _cv_pc.bind_all("<MouseWheel>",
+            lambda ev: _cv_pc.yview_scroll(int(-1*(ev.delta/120)), "units")))
+        _cv_pc.bind("<Leave>", lambda e: _cv_pc.unbind_all("<MouseWheel>"))
+        self._proceso_completo_module = ProcesoCompletoRemesaModule(perfil_fn=self._perfil_activo)
+        self._proceso_completo_module._build(container=_inner_pc)
 
         # Activar panel inicial
         root.after(50, lambda: _show_panel("generar"))

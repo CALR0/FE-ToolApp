@@ -44,6 +44,7 @@ testap/
 │   ├── editar_xml.py              ← EditarXMLModule: edición inline de campos de un XML existente
 │   ├── reconstruir_xml.py         ← ReconstruirXMLModule: aplica transformaciones DIAN a XMLs originales
 │   ├── extraer_datos_rg.py        ← ExtraerDatosRGModule: extrae datos de PDFs de facturas y exporta a Excel
+│   ├── proceso_completo_remesa.py ← ProcesoCompletoRemesaModule: orquesta anular+corregir generador+cumplir
 │   ├── cruzar_remesas.py          ← CruzarRemesasModule: cruza el Excel de "Extraer Datos RG" con otro Excel externo
 │   ├── corregir_remesa.py         ← CorregirRemesaModule: consulta y corrige una remesa en el RNDC (proceso 38)
 │   ├── anular_cumplido_remesa.py  ← AnularCumplidoRemesaModule: anula el cumplido de una remesa (proceso 28)
@@ -80,7 +81,7 @@ Ventana principal. Construye:
 - **Header** con logo FE-Tool
 - **Pill bar** de selección de perfil (ut_tsp / ut_elogia)
 - **Sidebar** con grupos colapsables: Facturación / Remesas / Otros
-- **11 paneles** de contenido (uno por módulo), mostrados/ocultados con `pack/pack_forget`
+- **12 paneles** de contenido (uno por módulo), mostrados/ocultados con `pack/pack_forget`
 - **Barra de estado** inferior
 
 Al cambiar de perfil notifica activamente a `_rndc_uploader`, `_excel_loader` y `_reconstruir_module`.
@@ -183,6 +184,18 @@ Lógica de cálculo automático (botón Consultar):
 - **Suspensión (`S`)**: solo cargue + `MOTIVOSUSPENSIONREMESA="O"` (Otro); `CANTIDADENTREGADA=0`.
 
 Nombres de variables del proceso 5: `TIPOCUMPLIDOREMESA` (`C`/`S`), `CANTIDADINFORMACIONCARGA`, `CANTIDADENTREGADA`, cargue: `FECHALLEGADACARGUE/HORALLEGADACARGUEREMESA`, `FECHAENTRADACARGUE/HORAENTRADACARGUEREMESA`, `FECHASALIDACARGUE/HORASALIDACARGUEREMESA`; descargue: `FECHALLEGADADESCARGUE/HORALLEGADADESCARGUECUMPLIDO`, `FECHAENTRADADESCARGUE/HORAENTRADADESCARGUECUMPLIDO`, `FECHASALIDADESCARGUE/HORASALIDADESCARGUECUMPLIDO`. Las fechas vienen en `DD/MM/AAAA` de la consulta (sin conversión).
+
+### `ui/proceso_completo_remesa.py` — ProcesoCompletoRemesaModule ("Auto cambio-generador")
+**Orquestador** bajo "Remesas" (título e ítem del sidebar: "Auto cambio-generador"): ejecuta toda la cadena de una vez. Entrada: consecutivo + nuevo NIT generador (combobox `8000213085`/`9007867123` o manual) + código sede (default `1`) + Tipo ID (default `N`) + motivos por defecto (anulación `O`, cambio `3`). Botón **Ejecutar proceso** con confirmación y **log paso a paso**. Secuencia:
+1. Consultar cumplido (proceso 5) → captura tiempos reales **antes de anular**.
+2. Consultar remesa (proceso 3) → captura `BASE_FIELDS` para corregir (aborta si falla).
+3. Anular cumplido (proceso 28) **solo si estaba cumplida** (motivo `O`).
+4. Corregir generador (proceso 38, `CODIGOCAMBIO=4`): base + `numIdPropietario`=NIT nuevo + sede + motivo.
+5. Re-cumplir (proceso 5).
+
+**Árbol de re-cumplido** (`_plan_cumplido`): si el proceso 5 trae tiempos reales → Normal (cargue+descargue) o Suspensión (solo cargue); si no, calcula de citas (proceso 3) → Normal si hay cita cargue+descargue, Suspensión si solo cargue.
+
+**Sin rollback**: si un paso falla, **se detiene** y el log indica en qué punto quedó (para terminar a mano con los módulos paso-a-paso). **Reutiliza** funciones de servicio y constantes (`CorregirRemesaModule.BASE_FIELDS`, `CumplirRemesaModule.CARGUE_ROWS/DESCARGUE_ROWS/_fecha_hora_mas`) sin modificar esos módulos.
 
 ### Nota — credenciales de corrección/anulación
 Los perfiles pueden definir `rndc_usuario_corregir` / `rndc_password_corregir`. Los módulos de **corregir**, **anular cumplido** y **cumplir remesa** usan un helper `_perfil()` que sustituye las credenciales normales por estas (si existen) **solo en esos módulos**; el resto de la app sigue con `rndc_usuario`/`rndc_password`. Si el perfil no las define, hace fallback a las normales. Actualmente `ut_tsp` las tiene (`CG_TSP@137`).
