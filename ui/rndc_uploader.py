@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import os as _os
+import re as _re
 
 try:
     import requests as _requests
@@ -90,6 +91,8 @@ class RndcUploaderWindow:
         self.perfil_fn = perfil_fn
         self.archivos  = []   # lista de (nombre_archivo, bytes_contenido)
         self._cufe_map = {}   # iid → CUFE completo para el popup
+        self._cliente_nit_map = {}   # fac_iid → NIT del cliente de la factura
+        self._rem_prop_nit    = {}   # rem_iid → NIT del propietario de la remesa
         self._build()
 
     # ── Construcción UI ───────────────────────────────────────────────────────
@@ -430,13 +433,17 @@ class RndcUploaderWindow:
         self._lbl_rem_count.pack(side=tk.LEFT, padx=(6, 0))
 
         _rem_ref  = [None]
-        _rem_cols = [("N° Factura", "Consecutivo", "Radicado", "Valor ($)", "Cantidad Entregada", "Estado RNDC")]
+        _rem_cols = [("N° Factura", "Consecutivo", "Radicado", "Valor ($)", "Cantidad Entregada", "Propietario", "Estado RNDC")]
         _mk_copy_btn(hdr_rem, _rem_ref, _rem_cols, None)
 
-        cols_rem = ("N° Factura", "Consecutivo", "Radicado", "Valor ($)", "Cantidad Entregada", "Estado RNDC")
-        self._tree_rem = _make_table(body, cols_rem, [70, 80, 90, 95, 110, 600],
+        cols_rem = ("N° Factura", "Consecutivo", "Radicado", "Valor ($)", "Cantidad Entregada", "Propietario", "Estado RNDC")
+        self._tree_rem = _make_table(body, cols_rem, [70, 80, 90, 95, 110, 170, 480],
                                       height=8, expand=True)
         _rem_ref[0] = self._tree_rem
+
+        # Doble clic en una celda → seleccionar/copiar su texto
+        self._hacer_celda_copiable(self._tree_fac)
+        self._hacer_celda_copiable(self._tree_rem)
 
         for t in (self._tree_fac, self._tree_rem):
             t.tag_configure("ok",   background="#0e2a18", foreground="#22c55e")
@@ -479,6 +486,8 @@ class RndcUploaderWindow:
         for t in (self._tree_fac, self._tree_rem):
             for item in t.get_children():
                 t.delete(item)
+        self._cliente_nit_map.clear()
+        self._rem_prop_nit.clear()
 
         NS = {
             "cbc": "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2",
@@ -510,9 +519,13 @@ class RndcUploaderWindow:
                         except Exception:
                             pass
 
+                # NIT del cliente de la factura (para cruzar con el propietario de cada remesa)
+                cliente_nit = self._xml_text(root_el, [".//cac:ReceiverParty//cbc:CompanyID"], NS)
+
                 cufe_short = (cufe[:25] + "…") if len(cufe) > 25 else cufe
                 fac_iid = f"fac::{nombre}"
                 self._cufe_map[fac_iid] = cufe
+                self._cliente_nit_map[fac_iid] = cliente_nit
                 self._tree_fac.insert("", "end",
                     values=(nombre, nf, cliente, cufe_short, "0", "⏳ Pendiente de envío"),
                     tags=("pend",), iid=fac_iid)
@@ -558,7 +571,7 @@ class RndcUploaderWindow:
                             rem_iid  = f"rem::{nombre}::{rem_idx}"
                             tag_fila = "alt" if rem_idx % 2 == 0 else "pend"
                             self._tree_rem.insert("", "end", iid=rem_iid,
-                                values=(nf, consec, radicado, valor, peso, "⏳ Pendiente de envío"),
+                                values=(nf, consec, radicado, valor, peso, "", "⏳ Pendiente de envío"),
                                 tags=(tag_fila,))
                             n_rem = len(self._tree_rem.get_children())
                             self._lbl_rem_count.configure(text=f"({n_rem})")
@@ -581,6 +594,50 @@ class RndcUploaderWindow:
         self._consultar_estados_remesas()
 
     # ── Estado de remesa (igual criterio que Consultar Remesas) ────────────────
+
+    @staticmethod
+    def _hacer_celda_copiable(tree):
+        """Doble clic en una celda → muestra un campo con el texto, seleccionado,
+        para que el usuario pueda seleccionar y copiar (Ctrl+C). Se cierra al salir."""
+        def _on_dbl(event):
+            if tree.identify_region(event.x, event.y) != "cell":
+                return
+            col = tree.identify_column(event.x)
+            row = tree.identify_row(event.y)
+            if not row:
+                return
+            try:
+                idx   = int(col.replace("#", "")) - 1
+                valor = tree.item(row, "values")[idx]
+            except Exception:
+                return
+            bbox = tree.bbox(row, col)
+            if not bbox:
+                return
+            x, y, w, h = bbox
+            var = tk.StringVar(value=str(valor))
+            ent = tk.Entry(tree, textvariable=var, relief="flat",
+                           font=FONT_BODY, bg="#fff7d6", fg="#111111",
+                           insertbackground="#111111")
+            ent.place(x=x, y=y, width=max(w, 120), height=h)
+            ent.focus_set()
+            ent.selection_range(0, tk.END)
+            ent.icursor(tk.END)
+            ent.bind("<FocusOut>", lambda e: ent.destroy())
+            ent.bind("<Escape>",   lambda e: ent.destroy())
+            ent.bind("<Return>",   lambda e: ent.destroy())
+        tree.bind("<Double-1>", _on_dbl)
+
+    @staticmethod
+    def _nit_coincide(a, b):
+        """Compara dos NIT ignorando el dígito de verificación: coinciden si uno
+        es prefijo del otro (ej. '800021308' vs '8000213085'). Si falta alguno,
+        devuelve True (no se marca como diferente)."""
+        da = _re.sub(r"\D", "", str(a))
+        db = _re.sub(r"\D", "", str(b))
+        if not da or not db:
+            return True
+        return da.startswith(db) or db.startswith(da)
 
     @staticmethod
     def _estado_remesa_txt(cod, manifiesto=""):
@@ -619,8 +676,10 @@ class RndcUploaderWindow:
                 # Completar radicado si vino vacío del XML
                 if (not str(vals[2]).strip() or str(vals[2]).strip() in ("0", "—")) and res.get("radicado"):
                     vals[2] = res.get("radicado")
-                vals[5] = estado
+                vals[5] = res.get("propietario", "")   # Propietario / generador de la remesa
+                vals[6] = estado
                 self._tree_rem.item(item_id, values=vals)
+                self._rem_prop_nit[item_id] = res.get("propietario_nit", "")
         self._lbl_rem_count.configure(text=f"({total})")
 
     def _xml_text(self, root, paths, ns):
@@ -694,20 +753,32 @@ class RndcUploaderWindow:
                     values=(vals[0], vals[1], vals[2], vals[3], vals[4], f"{icono} {mensaje}"),
                     tags=(tag,))
 
-            if exito:
-                estado_rem = "✓ Aceptada por el RNDC"
-                tag_rem    = "ok"
-            else:
-                estado_rem = f"✗ {mensaje}"
-                tag_rem    = "err"
-
             for item_id in self._tree_rem.get_children():
                 if item_id.startswith(f"rem::{nombre}::"):
-                    vals_rem = self._tree_rem.item(item_id, "values")
-                    self._tree_rem.item(item_id,
-                        values=(vals_rem[0], vals_rem[1], vals_rem[2],
-                                vals_rem[3], vals_rem[4], estado_rem),
-                        tags=(tag_rem,))
+                    vals_rem = list(self._tree_rem.item(item_id, "values"))
+                    if exito:
+                        estado_rem = "✓ Aceptada por el RNDC"
+                        tag_rem    = "ok"
+                    else:
+                        # Identificar la remesa culpable: por consecutivo mencionado
+                        # en el error, o porque su propietario tiene un NIT distinto
+                        # al cliente de la factura. El detalle se muestra SOLO en ella.
+                        consec_rem = str(vals_rem[1]).strip()
+                        rem_nit = self._rem_prop_nit.get(item_id, "")
+                        fac_nit = self._cliente_nit_map.get(fac_id, "")
+                        culpable = False
+                        if consec_rem and consec_rem in str(mensaje):
+                            culpable = True
+                            estado_rem = f"✗ {mensaje}"
+                        elif rem_nit and fac_nit and not self._nit_coincide(rem_nit, fac_nit):
+                            culpable = True
+                            estado_rem = (f"✗ NIT propietario {rem_nit} ≠ cliente factura "
+                                          f"{fac_nit}  ·  {mensaje}")
+                        if not culpable:
+                            estado_rem = "✗ Factura rechazada (ver fila de la factura)"
+                        tag_rem = "err"
+                    vals_rem[6] = estado_rem   # índice 6 = Estado RNDC
+                    self._tree_rem.item(item_id, values=vals_rem, tags=(tag_rem,))
 
             if exito:
                 ok_count += 1

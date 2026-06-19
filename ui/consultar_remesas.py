@@ -48,6 +48,38 @@ class ConsultarRemesasModule:
         win.clipboard_append("\n".join(lineas))
         messagebox.showinfo("Copiado", f"{len(filas)} fila(s) copiadas al portapapeles.")
 
+    @staticmethod
+    def _hacer_celda_copiable(tree):
+        """Doble clic en una celda → campo con el texto seleccionado para copiar."""
+        def _on_dbl(event):
+            if tree.identify_region(event.x, event.y) != "cell":
+                return
+            col = tree.identify_column(event.x)
+            row = tree.identify_row(event.y)
+            if not row:
+                return
+            try:
+                idx   = int(col.replace("#", "")) - 1
+                valor = tree.item(row, "values")[idx]
+            except Exception:
+                return
+            bbox = tree.bbox(row, col)
+            if not bbox:
+                return
+            x, y, w, h = bbox
+            var = tk.StringVar(value=str(valor))
+            ent = tk.Entry(tree, textvariable=var, relief="flat",
+                           font=FONT_BODY, bg="#fff7d6", fg="#111111",
+                           insertbackground="#111111")
+            ent.place(x=x, y=y, width=max(w, 120), height=h)
+            ent.focus_set()
+            ent.selection_range(0, tk.END)
+            ent.icursor(tk.END)
+            ent.bind("<FocusOut>", lambda e: ent.destroy())
+            ent.bind("<Escape>",   lambda e: ent.destroy())
+            ent.bind("<Return>",   lambda e: ent.destroy())
+        tree.bind("<Double-1>", _on_dbl)
+
     # ── Helpers internos ──────────────────────────────────────────────────────
 
     def _campo(self, parent, etiqueta, var, row, col_start=0, ancho=22):
@@ -179,6 +211,7 @@ class ConsultarRemesasModule:
         self._tree.tag_configure("ok",    background=BG2, foreground="#4ade80")
         self._tree.tag_configure("warn",  background=BG2, foreground="#fbbf24")
         self._tree.tag_configure("error", background=BG2, foreground="#f87171")
+        self._hacer_celda_copiable(self._tree)
 
         ent.focus_set()
         self._ent = ent
@@ -370,6 +403,7 @@ class ConsultarRemesasModule:
         tree_m.tag_configure("ok",    background=BG2, foreground="#4ade80")
         tree_m.tag_configure("warn",  background=BG2, foreground="#fbbf24")
         tree_m.tag_configure("error", background=BG2, foreground="#f87171")
+        self._hacer_celda_copiable(tree_m)
 
         btn_copiar_m = tk.Label(fila_btns, text="  📋 Copiar tabla  ",
                                 font=FONT_BODY, bg=ACCENT2, fg="white",

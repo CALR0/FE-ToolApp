@@ -18,7 +18,7 @@ _RNDC_CONSULTA_REMESA_TMPL = """<?xml version='1.0' encoding='ISO-8859-1' ?>
     <tipo>3</tipo>
     <procesoid>3</procesoid>
   </solicitud>
-  <variables>INGRESOID,CONSECUTIVOREMESA,CANTIDADCARGADA,ESTADO,REMPROPIETARIO,REM_DESTI,REM_ORIG,NUMMANIFIESTOCARGA</variables>
+  <variables>INGRESOID,CONSECUTIVOREMESA,CANTIDADCARGADA,ESTADO,REMPROPIETARIO,REM_DESTI,REM_ORIG,NUMMANIFIESTOCARGA,NUMIDPROPIETARIO</variables>
   <documento>
     <NUMNITEMPRESATRANSPORTE>'{nit_empresa}'</NUMNITEMPRESATRANSPORTE>
     <CONSECUTIVOREMESA>'{consecutivo_remesa}'</CONSECUTIVOREMESA>
@@ -155,26 +155,42 @@ def consultar_radicado_remesa(consecutivo_remesa, perfil):
         _log("No se pudo parsear el XML interno.")
         return False, f"No se pudo parsear la respuesta: {inner[:200]}"
 
-    # 5. Leer INGRESOID y CANTIDADCARGADA (peso en kg)
-    ingresoid_el = root_el.find(".//ingresoid")
-    if ingresoid_el is not None and ingresoid_el.text:
-        radicado = ingresoid_el.text.strip()
+    # 5. Elegir el <documento> correcto y leer sus campos.
+    #    Una remesa con historial puede devolver VARIOS <documento> con estados
+    #    distintos (ej. AC y CE) y el ORDEN NO es determinista. Hay que elegir el
+    #    estado más avanzado: se prefiere CE (cumplida); si ninguno es CE, el de
+    #    mayor INGRESOID (registro más reciente). Esto evita el falso "AC/Pendiente"
+    #    intermitente en la consulta masiva.
+    def _doc_estado(d):
+        e = d.find("estado")
+        return (e.text or "").strip().upper() if e is not None and e.text else ""
 
-        doc_el = root_el.find(".//documento")
-        todos  = {child.tag: (child.text or "").strip() for child in doc_el} if doc_el is not None else {}
-        _log(f"Todos los tags del <documento>: {todos}")
+    def _doc_ingresoid(d):
+        x = d.find("ingresoid")
+        try:
+            return int((x.text or "0").strip())
+        except Exception:
+            return 0
 
-        cp          = todos.get("cantidadcargada", "").strip()
-        peso        = cp
-        estado      = todos.get("estado", "").strip().upper()
-        propietario = todos.get("rempropietario", "").strip()
-        destino     = todos.get("rem_desti", "").strip()
-        origen      = todos.get("rem_orig", "").strip()
-        manifiesto  = todos.get("nummanifiestocarga", "").strip()
-        _log(f"INGRESOID={radicado}  cantidadcargada={cp!r}  estado={estado!r}  propietario={propietario!r}  origen={origen!r}  destino={destino!r}  manifiesto={manifiesto!r}")
-        return True, {"radicado": radicado, "peso": peso, "estado": estado,
-                      "propietario": propietario, "origen": origen, "destino": destino,
-                      "manifiesto": manifiesto}
+    docs = root_el.findall(".//documento")
+    if docs:
+        ce_docs = [d for d in docs if _doc_estado(d) == "CE"]
+        doc_el  = ce_docs[0] if ce_docs else max(docs, key=_doc_ingresoid)
+        todos   = {child.tag: (child.text or "").strip() for child in doc_el}
+        radicado = todos.get("ingresoid", "").strip()
+        if radicado:
+            cp          = todos.get("cantidadcargada", "").strip()
+            peso        = cp
+            estado      = todos.get("estado", "").strip().upper()
+            propietario = todos.get("rempropietario", "").strip()
+            destino     = todos.get("rem_desti", "").strip()
+            origen      = todos.get("rem_orig", "").strip()
+            manifiesto  = todos.get("nummanifiestocarga", "").strip()
+            propietario_nit = todos.get("numidpropietario", "").strip()
+            _log(f"docs={len(docs)} elegido INGRESOID={radicado} estado={estado!r} manifiesto={manifiesto!r}")
+            return True, {"radicado": radicado, "peso": peso, "estado": estado,
+                          "propietario": propietario, "origen": origen, "destino": destino,
+                          "manifiesto": manifiesto, "propietario_nit": propietario_nit}
 
     # Capturar ErrorMSG (tag real del RNDC para errores)
     errmsg_el = root_el.find(".//ErrorMSG")
