@@ -693,11 +693,36 @@ class ExcelLoaderWindow:
             if cc is not None:
                 nov_col = self._novedad_col_activa(df)
                 nov_serie = df[nov_col] if nov_col and nov_col in df.columns else [""] * len(df)
-                mask = [
-                    self._pasa_filtro(filtro, r, v, x, n)
-                    for r, v, x, n in zip(df[cc["rem"]], df[cc["val"]], df[cc["rec"]], nov_serie)
-                ]
-                df = df[mask]
+
+                if filtro in self.FILTROS_NOVEDAD:
+                    # Filtro a nivel de FACTURA: solo incluir facturas donde TODAS las
+                    # remesas tienen Reconstruir=Sí y novedad vacía.
+                    c_nf_col = self.vars.get("col_nf")
+                    c_nf_col = c_nf_col.get() if c_nf_col else None
+                    if c_nf_col and c_nf_col != "— No usar —" and c_nf_col in df.columns:
+                        fila_pasa = [
+                            self._pasa_filtro(filtro, r, v, x, n)
+                            for r, v, x, n in zip(df[cc["rem"]], df[cc["val"]], df[cc["rec"]], nov_serie)
+                        ]
+                        # Agrupar por N° factura: la factura pasa solo si TODAS sus filas pasan
+                        df["_fila_pasa"] = fila_pasa
+                        facturas_ok = df.groupby(df[c_nf_col].astype(str))["_fila_pasa"].all()
+                        nf_ok = set(facturas_ok[facturas_ok].index)
+                        df = df[df[c_nf_col].astype(str).isin(nf_ok)]
+                        df = df.drop(columns=["_fila_pasa"])
+                    else:
+                        # Sin columna de N° factura: caer a filtro fila por fila
+                        mask = [
+                            self._pasa_filtro(filtro, r, v, x, n)
+                            for r, v, x, n in zip(df[cc["rem"]], df[cc["val"]], df[cc["rec"]], nov_serie)
+                        ]
+                        df = df[mask]
+                else:
+                    mask = [
+                        self._pasa_filtro(filtro, r, v, x, n)
+                        for r, v, x, n in zip(df[cc["rem"]], df[cc["val"]], df[cc["rec"]], nov_serie)
+                    ]
+                    df = df[mask]
 
         def col(clave):
             v = self.vars[clave].get()
