@@ -277,15 +277,18 @@ La app está pensada para distribuirse como `.exe` con PyInstaller `--onefile`. 
 python main.py
 
 # Compilar con PyInstaller (usar el .spec oficial — ya incluye freeze_support, icono y deps)
-# IMPORTANTE: ejecutar desde dentro de FE-ToolApp\ (pathex=['.'] en el spec)
-C:\Users\clizarazo\AppData\Local\Python\pythoncore-3.14-64\Scripts\pyinstaller.exe FE-Tool.spec
+# IMPORTANTE: ejecutar desde dentro de testap\ (pathex=['.'] en el spec)
+pyinstaller FE-Tool.spec
+# o si pyinstaller no está en el PATH:
+python -m pyinstaller FE-Tool.spec
 ```
 
-El `.exe` queda en `FE-ToolApp\dist\FE-Tool.exe`.
+El `.exe` queda en `dist\FE-Tool.exe`.
 
 **Notas sobre la compilación:**
-- Python 3.14 + PyInstaller 6.20.0 funciona correctamente con este proyecto.
-- No usar `python -m pyinstaller` en esta instalación — falla. Usar la ruta absoluta al `.exe` de PyInstaller como se muestra arriba.
+- Comando general: `pyinstaller FE-Tool.spec` o `python -m pyinstaller FE-Tool.spec` desde la carpeta `testap\`.
+- Verificado con Python 3.13.2 + PyInstaller 6.14.1 (`pip show pyinstaller` para confirmar versión).
+- En equipos con instalación no estándar de Python (ej. pythoncore-3.14), puede ser necesario usar la ruta absoluta al ejecutable: `C:\...\Scripts\pyinstaller.exe FE-Tool.spec`.
 - El spec no necesita `threading` en hiddenimports — PyInstaller lo detecta como stdlib automáticamente.
 - UPX está desactivado (`upx=False`) para evitar falsos positivos de antivirus.
 
