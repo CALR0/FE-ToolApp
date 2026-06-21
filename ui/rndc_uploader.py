@@ -97,6 +97,16 @@ class RndcUploaderWindow:
 
     # ── Construcción UI ───────────────────────────────────────────────────────
     def _build(self, container=None):
+        # Inicializar atributos que pueden faltar si se usó __new__ en app.py
+        if not hasattr(self, "_cufe_map"):
+            self._cufe_map = {}
+        if not hasattr(self, "archivos"):
+            self.archivos = []
+        if not hasattr(self, "_cliente_nit_map"):
+            self._cliente_nit_map = {}
+        if not hasattr(self, "_rem_prop_nit"):
+            self._rem_prop_nit = {}
+
         if container is None:
             win = tk.Toplevel(self.parent)
             self.win = win
@@ -494,6 +504,10 @@ class RndcUploaderWindow:
             "cac": "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2",
         }
 
+        import re as _re_ns
+        _NS_NORM = _re_ns.compile(
+            r'<cac:InvoiceLine\s+xmlns="[^"]*"(?:\s+xmlns:[^=]+="[^"]*")*\s*>')
+
         for nombre, contenido_bytes in self.archivos:
             try:
                 root_el = ET.fromstring(contenido_bytes.decode("utf-8", errors="replace"))
@@ -511,7 +525,7 @@ class RndcUploaderWindow:
                     invoice_xml_pre = self._extraer_invoice_xml(root_el, contenido_bytes)
                     if invoice_xml_pre:
                         try:
-                            inv_pre = ET.fromstring(invoice_xml_pre)
+                            inv_pre = ET.fromstring(_NS_NORM.sub("<cac:InvoiceLine>", invoice_xml_pre))
                             cliente = self._xml_text(inv_pre, [
                                 ".//cac:AccountingCustomerParty//cbc:RegistrationName",
                                 ".//cac:AccountingCustomerParty//cbc:Name",
@@ -536,7 +550,9 @@ class RndcUploaderWindow:
                 invoice_xml = self._extraer_invoice_xml(root_el, contenido_bytes)
                 if invoice_xml:
                     try:
-                        inv_root = ET.fromstring(invoice_xml)
+                        # Normalizar namespaces inline en InvoiceLine antes de parsear
+                        invoice_xml_norm = _NS_NORM.sub("<cac:InvoiceLine>", invoice_xml)
+                        inv_root = ET.fromstring(invoice_xml_norm)
                         lineas = inv_root.findall(
                             ".//{urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2}InvoiceLine")
                         for linea in lineas:
@@ -585,11 +601,15 @@ class RndcUploaderWindow:
                     vf[4] = str(n_rem_fac)
                     self._tree_fac.item(fac_iid, values=vf)
 
-            except ET.ParseError as e:
+            except Exception as e:
                 self._tree_fac.insert("", "end",
-                    values=(nombre, "—", "—", "—", "—", f"⚠ XML inválido: {e}"),
+                    values=(nombre, "—", "—", "—", "—", f"⚠ Error al leer: {e}"),
                     tags=("err",))
 
+        try:
+            self.win.update_idletasks()
+        except Exception:
+            pass
         # ── Consultar el estado actual de cada remesa en el RNDC (antes de enviar) ──
         self._consultar_estados_remesas()
 
