@@ -57,6 +57,7 @@ class ExcelLoaderWindow:
         ("col_nom_cli",   "Nombre cliente (opcional)", False, "Usa 'Datos del Cliente'"),
         ("col_novedad",   "Novedad remesa (opcional)",             False, "Solo se usa para el filtro 'Reconstruir=Sí y Novedad vacía'"),
         ("col_comp_gen",  "Comp. Generador Carga RNDC (opcional)", False, "Solo se usa junto al filtro 'Reconstruir=Sí y Novedad vacía'"),
+        ("col_estado",    "Estado (opcional)",                     False, "Si se mapea, omite las facturas ya generadas (con Estado lleno, ej. CARGADA/PENDIENTE)"),
     ]
 
     def __init__(self, parent, perfil_fn, on_success, max_facturas=200):
@@ -164,6 +165,7 @@ class ExcelLoaderWindow:
                     "col_novedad":  ["novedad"],
                     "col_comp_gen": ["comp. generador", "generador carga", "comp_generador",
                                      "generador_carga", "comp generador"],
+                    "col_estado":   ["estado"],
                 }
                 if any(h in col_norm for h in hints.get(clave, [])) \
                    and not (clave == "col_nit_cli" and "unitar" in col_norm):
@@ -325,6 +327,7 @@ class ExcelLoaderWindow:
                         "col_novedad":  ["novedad"],
                         "col_comp_gen": ["comp. generador", "generador carga", "comp_generador",
                                          "generador_carga", "comp generador"],
+                        "col_estado":   ["estado"],
                     }
                     if any(h in col_norm for h in hints.get(clave, [])) \
                        and not (clave == "col_nit_cli" and "unitar" in col_norm):
@@ -785,6 +788,25 @@ class ExcelLoaderWindow:
                         for r, v, x, n in zip(df[cc["rem"]], df[cc["val"]], df[cc["rec"]], nov_serie)
                     ]
                     df = df[mask]
+
+        # Filtro por Estado (independiente del filtro de generación): si la columna
+        # está mapeada, se omiten las facturas YA generadas — las que tienen algún
+        # valor en Estado (ej. CARGADA/PENDIENTE). Se genera solo la factura cuyas
+        # remesas tengan TODAS el Estado vacío (mismo criterio a nivel de factura).
+        est_var = self.vars.get("col_estado")
+        est_col = est_var.get() if est_var and est_var.get() != "— No usar —" else None
+        if est_col and est_col in df.columns:
+            c_nf_e = self.vars.get("col_nf")
+            c_nf_e = c_nf_e.get() if c_nf_e else None
+            if c_nf_e and c_nf_e != "— No usar —" and c_nf_e in df.columns:
+                df = df.copy()
+                df["_est_vacio"] = [self._es_vacio(v) for v in df[est_col]]
+                fac_ok_e = df.groupby(df[c_nf_e].astype(str))["_est_vacio"].all()
+                nf_ok_e = set(fac_ok_e[fac_ok_e].index)
+                df = df[df[c_nf_e].astype(str).isin(nf_ok_e)]
+                df = df.drop(columns=["_est_vacio"])
+            else:
+                df = df[[self._es_vacio(v) for v in df[est_col]]]
 
         def col(clave):
             v = self.vars[clave].get()
