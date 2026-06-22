@@ -55,7 +55,8 @@ class ExcelLoaderWindow:
         ("col_desc_lin",  "Descripción línea remesa",  False, "Servicio de transporte"),
         ("col_nit_cli",   "NIT cliente (opcional)",    False, "Usa 'Datos del Cliente'. El dígito = último número del NIT"),
         ("col_nom_cli",   "Nombre cliente (opcional)", False, "Usa 'Datos del Cliente'"),
-        ("col_novedad",   "Novedad remesa (opcional)", False, "Solo se usa para el filtro 'Reconstruir=Sí y Novedad vacía'"),
+        ("col_novedad",   "Novedad remesa (opcional)",             False, "Solo se usa para el filtro 'Reconstruir=Sí y Novedad vacía'"),
+        ("col_comp_gen",  "Comp. Generador Carga RNDC (opcional)", False, "Solo se usa junto al filtro 'Reconstruir=Sí y Novedad vacía'"),
     ]
 
     def __init__(self, parent, perfil_fn, on_success, max_facturas=200):
@@ -161,6 +162,8 @@ class ExcelLoaderWindow:
                     "col_nit_cli":  ["nit"],
                     "col_nom_cli":  ["nombre_cliente", "nombre cli", "nom_cli", "cliente"],
                     "col_novedad":  ["novedad"],
+                    "col_comp_gen": ["comp. generador", "generador carga", "comp_generador",
+                                     "generador_carga", "comp generador"],
                 }
                 if any(h in col_norm for h in hints.get(clave, [])) \
                    and not (clave == "col_nit_cli" and "unitar" in col_norm):
@@ -169,6 +172,8 @@ class ExcelLoaderWindow:
                     break
             if not matched:
                 var.set("— No usar —")
+        # Actualizar valores del combo Comp. Generador si estaba mapeado
+        self._actualizar_comp_gen_valores()
 
         # Limpiar resumen
         if hasattr(self, "lbl_resumen") and self.lbl_resumen is not None:
@@ -318,6 +323,8 @@ class ExcelLoaderWindow:
                         "col_nit_cli":  ["nit"],
                         "col_nom_cli":  ["nombre_cliente", "nombre cli", "nom_cli", "cliente"],
                         "col_novedad":  ["novedad"],
+                        "col_comp_gen": ["comp. generador", "generador carga", "comp_generador",
+                                         "generador_carga", "comp generador"],
                     }
                     if any(h in col_norm for h in hints.get(clave, [])) \
                        and not (clave == "col_nit_cli" and "unitar" in col_norm):
@@ -330,6 +337,10 @@ class ExcelLoaderWindow:
                      fg=TEXT2 if default else DANGER,
                      anchor="w", wraplength=320, justify="left"
                      ).pack(side=tk.LEFT, padx=(0,8), fill=tk.X, expand=True)
+
+            # Al cambiar la columna Comp. Generador, actualizar valores disponibles
+            if clave == "col_comp_gen":
+                var.trace_add("write", lambda *_: self._actualizar_comp_gen_valores())
 
         # ── Resumen ───────────────────────────────────────────────────────────
         self.lbl_resumen = tk.Label(body, text="", font=FONT_BODY,
@@ -374,6 +385,21 @@ class ExcelLoaderWindow:
                      font=FONT_BODY, width=38).pack(side=tk.LEFT)
         tk.Label(filtro_frame,
                  text="  (requiere Excel del cruce con sus columnas de validación)",
+                 font=FONT_SMALL, bg=BG2, fg=TEXT2).pack(side=tk.LEFT, padx=(6, 0))
+
+        # ── Filtro adicional: valor de Comp. Generador Carga RNDC ────────────
+        compgen_frame = tk.Frame(body, bg=BG2, padx=12, pady=6)
+        compgen_frame.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(compgen_frame, text="Comp. Generador RNDC (valor requerido):",
+                 font=FONT_BODY, bg=BG2, fg=TEXT).pack(side=tk.LEFT, padx=(0, 10))
+        self._comp_gen_valor_var = tk.StringVar(value="— No usar —")
+        self._comp_gen_valor_combo = ttk.Combobox(
+            compgen_frame, textvariable=self._comp_gen_valor_var,
+            values=["— No usar —", "Todas"], state="readonly",
+            font=FONT_BODY, width=22)
+        self._comp_gen_valor_combo.pack(side=tk.LEFT)
+        tk.Label(compgen_frame,
+                 text="  (activo solo con filtro 'Reconstruir=Sí y Novedad vacía' y columna mapeada)",
                  font=FONT_SMALL, bg=BG2, fg=TEXT2).pack(side=tk.LEFT, padx=(6, 0))
 
         btn_row = tk.Frame(body, bg=BG)
@@ -636,6 +662,27 @@ class ExcelLoaderWindow:
             return v.get()
         return self._col_novedad(df)
 
+    def _actualizar_comp_gen_valores(self):
+        """Puebla el combo de valor de Comp. Generador con los valores únicos
+        de la columna mapeada (+ 'Todas' y '— No usar —')."""
+        combo = getattr(self, "_comp_gen_valor_combo", None)
+        if combo is None:
+            return
+        cg_var = self.vars.get("col_comp_gen")
+        col = cg_var.get() if cg_var else None
+        if not col or col == "— No usar —" or self.df_raw is None or col not in self.df_raw.columns:
+            combo.configure(values=["— No usar —", "Todas"])
+            self._comp_gen_valor_var.set("— No usar —")
+            return
+        vals_uniq = sorted({str(v).strip() for v in self.df_raw[col].dropna() if str(v).strip()})
+        opciones = ["— No usar —", "Todas"] + vals_uniq
+        combo.configure(values=opciones)
+        # Si el valor actual no es válido, poner el primer valor real o "SI" si existe
+        cur = self._comp_gen_valor_var.get()
+        if cur not in opciones:
+            default = "SI" if "SI" in vals_uniq else (vals_uniq[0] if vals_uniq else "Todas")
+            self._comp_gen_valor_var.set(default)
+
     # Filtros que además exigen la columna 'Novedad remesa'
     FILTROS_NOVEDAD = {"Reconstruir = Sí y Novedad vacía"}
 
@@ -710,6 +757,21 @@ class ExcelLoaderWindow:
                         nf_ok = set(facturas_ok[facturas_ok].index)
                         df = df[df[c_nf_col].astype(str).isin(nf_ok)]
                         df = df.drop(columns=["_fila_pasa"])
+
+                        # Filtro adicional: Comp. Generador Carga RNDC (a nivel de factura)
+                        cg_col_var = self.vars.get("col_comp_gen")
+                        cg_col = cg_col_var.get() if cg_col_var and cg_col_var.get() != "— No usar —" else None
+                        cg_val = getattr(self, "_comp_gen_valor_var", None)
+                        cg_val = cg_val.get() if cg_val else "— No usar —"
+                        if cg_col and cg_col in df.columns and cg_val not in ("— No usar —", "Todas"):
+                            df["_cg_pasa"] = [
+                                str(v).strip().upper() == cg_val.strip().upper()
+                                for v in df[cg_col]
+                            ]
+                            facturas_ok_cg = df.groupby(df[c_nf_col].astype(str))["_cg_pasa"].all()
+                            nf_ok_cg = set(facturas_ok_cg[facturas_ok_cg].index)
+                            df = df[df[c_nf_col].astype(str).isin(nf_ok_cg)]
+                            df = df.drop(columns=["_cg_pasa"])
                     else:
                         # Sin columna de N° factura: caer a filtro fila por fila
                         mask = [
