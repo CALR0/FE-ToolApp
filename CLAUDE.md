@@ -158,6 +158,8 @@ Al exportar, parte del Excel de RG **completo** (todas sus columnas/filas origin
 
 > Nota sobre conteos: como `¿Coinciden remesas?` cuenta **filas**, si el otro Excel trae remesas duplicadas o filas con consecutivo en blanco, el conteo puede no cuadrar con los consecutivos únicos visibles.
 
+**Modal "🔎 Consultar facturas (Excel)"** (`_abrir_modal_consulta`): herramienta **independiente del cruce** dentro del mismo módulo. Permite cargar un Excel cualquiera (ej. el archivo final del cruce), **con selector de hoja**, mapear la columna de N° Factura (auto-detección por hints de factura), y **pegar una lista de números de factura** (separados por coma, espacio, punto y coma o saltos de línea) en un cuadro de texto. Al buscar, normaliza cada número con `_norm_factura` (quita `.0` y espacios), filtra las filas del Excel cuyo N° Factura coincida, y muestra: cuántas se **encontraron** y cuáles **no se encontraron**, más una **tabla de previsualización de columnas dinámicas** con todas las columnas originales del Excel. Botón **"💾 Exportar encontradas"** guarda solo esas filas (todos sus datos tal cual) a Excel/CSV. Botón **"📋 Copiar tabla"** vuelca encabezados+filas de la previsualización al portapapeles como TSV (pegable en Excel) sin exportar. Botón **"🗑 Limpiar"** resetea archivo, hoja, columna, texto pegado, tabla y estado. Estado del modal aislado con prefijo `_cf_` (`_cf_xl`, `_cf_df`, `_cf_nombre`, `_cf_df_encontradas`) para no interferir con el estado del cruce.
+
 ### `ui/corregir_remesa.py` — CorregirRemesaModule
 Corrige una remesa en el RNDC vía **proceso 38** (`tipo=1`), replicando el formulario web del RNDC. Flujo:
 1. Escribir consecutivo → **Consultar remesa** (`consultar_remesa_completa`, proceso 3 / `tipo=3` / `variables=*`).

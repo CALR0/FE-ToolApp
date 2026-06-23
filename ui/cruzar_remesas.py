@@ -80,6 +80,11 @@ class CruzarRemesasModule:
         self._consecutivos_otro_por_factura = {}
         self._comp_gen_otro_por_factura = {}
         self._novedad_otro_por_factura = {}
+        # Estado del modal "Consultar facturas (Excel)" — independiente del cruce
+        self._cf_xl = None
+        self._cf_df = None
+        self._cf_nombre = ""
+        self._cf_df_encontradas = None
 
     # ── Construcción de la UI ────────────────────────────────────────────────
 
@@ -183,6 +188,12 @@ class CruzarRemesasModule:
                                       cursor="hand2", padx=14, pady=6)
         self._btn_exportar.pack(side=tk.LEFT)
         self._btn_exportar.bind("<Button-1>", lambda e: self._exportar())
+
+        self._btn_consultar = tk.Label(act_row, text="🔎  Consultar facturas (Excel)",
+                                       font=FONT_BODY, bg="#0d9488", fg="white",
+                                       cursor="hand2", padx=14, pady=6)
+        self._btn_consultar.pack(side=tk.LEFT, padx=(10, 0))
+        self._btn_consultar.bind("<Button-1>", lambda e: self._abrir_modal_consulta())
 
         self._lbl_estado = tk.Label(body, text="", font=FONT_BODY, bg=BG, fg=TEXT2, anchor="w")
         self._lbl_estado.pack(anchor="w", pady=(8, 4))
@@ -596,3 +607,309 @@ class CruzarRemesasModule:
                 f"Archivo guardado ({filtro}):\n{ruta_out}\n\n{len(df)} filas · {n_fac} factura(s)")
         except Exception as ex:
             messagebox.showerror("Error al exportar", str(ex))
+
+    # ── Modal: Consultar facturas en un Excel por número ──────────────────────
+
+    @staticmethod
+    def _norm_factura(v):
+        """Normaliza un número de factura para comparar: sin espacios y sin el
+        '.0' que pandas añade a enteros leídos como float."""
+        if pd.isna(v):
+            return ""
+        if isinstance(v, float) and v.is_integer():
+            return str(int(v))
+        s = str(v).strip()
+        if s.endswith(".0") and s[:-2].isdigit():
+            s = s[:-2]
+        return s
+
+    def _abrir_modal_consulta(self):
+        if not PANDAS_OK:
+            messagebox.showerror("Dependencia faltante",
+                "La librería 'pandas' no está instalada.\nEjecuta: pip install pandas openpyxl")
+            return
+
+        # Reset de estado del modal
+        self._cf_xl = None
+        self._cf_df = None
+        self._cf_nombre = ""
+        self._cf_df_encontradas = None
+
+        modal = tk.Toplevel(self.win)
+        modal.title("Consultar facturas en un Excel")
+        modal.configure(bg=BG)
+        modal.geometry("900x650")
+        modal.transient(self.win)
+        try:
+            from utils.helpers import resource_path
+            modal.iconbitmap(resource_path("icono.ico"))
+        except Exception:
+            pass
+
+        hdr = tk.Frame(modal, bg=BG2, pady=8)
+        hdr.pack(fill=tk.X)
+        tk.Label(hdr, text="🔎  Consultar facturas en un Excel",
+                 font=FONT_H1, bg=BG2, fg=TEXT).pack(padx=16)
+        tk.Label(hdr, text="Carga un Excel (ej. el del cruce), pega los números de factura "
+                           "y extrae solo esas facturas con todos sus datos.",
+                 font=FONT_SMALL, bg=BG2, fg=TEXT2).pack(padx=16, pady=(2, 0))
+
+        body = tk.Frame(modal, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=14, pady=10)
+
+        # ── Carga del archivo + hoja + columna ───────────────────────────────
+        carga = tk.Frame(body, bg=BG2, padx=10, pady=8)
+        carga.pack(fill=tk.X, pady=(0, 8))
+
+        fila1 = tk.Frame(carga, bg=BG2)
+        fila1.pack(fill=tk.X, pady=3)
+        btn_load = tk.Label(fila1, text="📂  Cargar Excel", font=FONT_BODY,
+                            bg=ACCENT, fg="white", cursor="hand2", padx=12, pady=5)
+        btn_load.pack(side=tk.LEFT, padx=(0, 10))
+        tk.Label(fila1, text="Hoja:", font=FONT_BODY, bg=BG2, fg=TEXT2).pack(side=tk.LEFT, padx=(0, 4))
+        cf_hoja_var = tk.StringVar(value="")
+        cf_hoja_combo = ttk.Combobox(fila1, textvariable=cf_hoja_var, values=[],
+                                     state="disabled", font=FONT_BODY, width=22)
+        cf_hoja_combo.pack(side=tk.LEFT, padx=(0, 10))
+        lbl_arch = tk.Label(fila1, text="Sin archivo cargado.", font=FONT_BODY,
+                            bg=BG2, fg=TEXT2, anchor="w")
+        lbl_arch.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        fila2 = tk.Frame(carga, bg=BG2)
+        fila2.pack(fill=tk.X, pady=3)
+        tk.Label(fila2, text="Columna N° Factura:", font=FONT_BODY,
+                 bg=BG2, fg=TEXT2).pack(side=tk.LEFT, padx=(0, 6))
+        cf_col_var = tk.StringVar(value="— No usar —")
+        cf_col_combo = ttk.Combobox(fila2, textvariable=cf_col_var,
+                                    values=["— No usar —"], state="readonly",
+                                    font=FONT_BODY, width=34)
+        cf_col_combo.pack(side=tk.LEFT)
+
+        # ── Caja de texto para pegar las facturas ────────────────────────────
+        tk.Label(body, text="Números de factura a buscar (separados por coma, espacio, "
+                            "punto y coma o saltos de línea):",
+                 font=FONT_BODY, bg=BG, fg=TEXT2).pack(anchor="w", pady=(4, 2))
+        txt_frame = tk.Frame(body, bg=BG2)
+        txt_frame.pack(fill=tk.X, pady=(0, 8))
+        cf_text = tk.Text(txt_frame, height=5, font=FONT_BODY, bg=BG3, fg=TEXT,
+                          insertbackground=TEXT, relief="flat", wrap="word")
+        cf_text.pack(fill=tk.X, padx=4, pady=4)
+
+        # ── Acciones del modal ───────────────────────────────────────────────
+        acc = tk.Frame(body, bg=BG)
+        acc.pack(fill=tk.X, pady=(0, 6))
+        btn_buscar = tk.Label(acc, text="🔍  Buscar facturas", font=FONT_BODY,
+                              bg="#0d9488", fg="white", cursor="hand2", padx=14, pady=6)
+        btn_buscar.pack(side=tk.LEFT, padx=(0, 10))
+        btn_exp = tk.Label(acc, text="💾  Exportar encontradas", font=FONT_BODY,
+                           bg=BG3, fg=TEXT2, cursor="hand2", padx=14, pady=6)
+        btn_exp.pack(side=tk.LEFT)
+
+        btn_copiar = tk.Label(acc, text="📋  Copiar tabla", font=FONT_BODY,
+                              bg="#334155", fg="white", cursor="hand2", padx=14, pady=6)
+        btn_copiar.pack(side=tk.LEFT, padx=(10, 0))
+
+        btn_limpiar = tk.Label(acc, text="🗑  Limpiar", font=FONT_BODY,
+                               bg="#555e7a", fg="white", cursor="hand2", padx=14, pady=6)
+        btn_limpiar.pack(side=tk.LEFT, padx=(10, 0))
+
+        lbl_estado = tk.Label(body, text="", font=FONT_BODY, bg=BG, fg=TEXT2,
+                              anchor="w", justify="left", wraplength=850)
+        lbl_estado.pack(anchor="w", pady=(4, 4))
+
+        # ── Tabla de previsualización (columnas dinámicas) ───────────────────
+        tbl = tk.Frame(body, bg=BG2)
+        tbl.pack(fill=tk.BOTH, expand=True)
+        cf_tree = ttk.Treeview(tbl, columns=(), show="headings",
+                               style="Cruce.Treeview", selectmode="browse")
+        vsb = ttk.Scrollbar(tbl, orient="vertical", command=cf_tree.yview)
+        hsb = ttk.Scrollbar(tbl, orient="horizontal", command=cf_tree.xview)
+        cf_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        hsb.pack(side=tk.BOTTOM, fill=tk.X)
+        cf_tree.pack(fill=tk.BOTH, expand=True)
+
+        # ── Lógica interna del modal ─────────────────────────────────────────
+        def _aplicar_df(df, nombre, hoja=""):
+            self._cf_df = df
+            self._cf_nombre = nombre
+            cols = ["— No usar —"] + list(df.columns.astype(str))
+            cf_col_combo.configure(values=cols)
+            # Auto-detectar columna de factura
+            elegido = "— No usar —"
+            for col in df.columns.astype(str):
+                cn = col.lower().replace(" ", "_").replace("°", "")
+                if any(h in cn for h in ["factura", "nfactura", "num_fac", "n_factura", "numero_factura"]):
+                    elegido = col
+                    break
+            cf_col_var.set(elegido)
+            info = f"hoja '{hoja}'  ·  " if hoja else ""
+            lbl_arch.configure(text=f"{nombre}  ·  {info}{len(df)} filas", fg=TEXT)
+
+        def _cargar():
+            ruta = filedialog.askopenfilename(
+                title="Selecciona el archivo Excel",
+                filetypes=[("Excel", "*.xlsx *.xls *.xlsm"), ("CSV", "*.csv"), ("Todos", "*.*")])
+            if not ruta:
+                return
+            nombre = ruta.split("/")[-1].split(chr(92))[-1]
+            if ruta.lower().endswith(".csv"):
+                try:
+                    df = pd.read_csv(ruta)
+                except Exception as e:
+                    messagebox.showerror("Error al leer CSV", str(e), parent=modal)
+                    return
+                self._cf_xl = None
+                cf_hoja_var.set("")
+                cf_hoja_combo.configure(values=[], state="disabled")
+                _aplicar_df(df, nombre)
+                return
+            try:
+                xl = pd.ExcelFile(ruta)
+            except Exception as e:
+                messagebox.showerror("Error al leer Excel", str(e), parent=modal)
+                return
+            if not xl.sheet_names:
+                messagebox.showwarning("Excel vacío", "El archivo no contiene hojas.", parent=modal)
+                return
+            self._cf_xl = xl
+            cf_hoja_combo.configure(values=xl.sheet_names, state="readonly")
+            cf_hoja_var.set(xl.sheet_names[0])
+            try:
+                df = xl.parse(xl.sheet_names[0])
+            except Exception as e:
+                messagebox.showerror("Error al leer la hoja", str(e), parent=modal)
+                return
+            _aplicar_df(df, nombre, xl.sheet_names[0])
+
+        def _on_hoja(_e=None):
+            if self._cf_xl is None:
+                return
+            hoja = cf_hoja_var.get()
+            try:
+                df = self._cf_xl.parse(hoja)
+            except Exception as e:
+                messagebox.showerror("Error al leer la hoja", str(e), parent=modal)
+                return
+            _aplicar_df(df, self._cf_nombre, hoja)
+
+        def _buscar():
+            if self._cf_df is None:
+                messagebox.showwarning("Sin archivo", "Primero carga un Excel.", parent=modal)
+                return
+            col = cf_col_var.get()
+            if col == "— No usar —" or col not in self._cf_df.columns:
+                messagebox.showwarning("Falta columna",
+                    "Selecciona la columna que contiene el N° de factura.", parent=modal)
+                return
+            crudo = cf_text.get("1.0", "end")
+            tokens = re.split(r"[\s,;]+", crudo.strip())
+            buscadas = []
+            vistos = set()
+            for t in tokens:
+                n = self._norm_factura(t)
+                if n and n not in vistos:
+                    vistos.add(n)
+                    buscadas.append(n)
+            if not buscadas:
+                messagebox.showwarning("Sin facturas",
+                    "Pega al menos un número de factura.", parent=modal)
+                return
+
+            df = self._cf_df.copy()
+            nf_norm = df[col].map(self._norm_factura)
+            set_buscadas = set(buscadas)
+            mask = nf_norm.isin(set_buscadas)
+            df_enc = df[mask]
+            encontradas = set(nf_norm[mask])
+            no_encontradas = [n for n in buscadas if n not in encontradas]
+
+            self._cf_df_encontradas = df_enc
+
+            # Pintar tabla (columnas dinámicas)
+            for it in cf_tree.get_children():
+                cf_tree.delete(it)
+            cols = list(df_enc.columns.astype(str))
+            cf_tree.configure(columns=cols)
+            for c0 in cols:
+                cf_tree.heading(c0, text=c0)
+                cf_tree.column(c0, width=130, anchor="center", stretch=False)
+            for _, row in df_enc.iterrows():
+                cf_tree.insert("", "end",
+                    values=[("" if pd.isna(v) else v) for v in row.tolist()])
+
+            n_enc = len(encontradas)
+            n_filas = len(df_enc)
+            msg = (f"✓ Encontradas: {n_enc}/{len(buscadas)} factura(s)  ·  {n_filas} fila(s).")
+            if no_encontradas:
+                msg += f"\n✗ No encontradas ({len(no_encontradas)}): " + ", ".join(no_encontradas)
+            lbl_estado.configure(text=msg, fg=SUCCESS if not no_encontradas else WARNING)
+            if n_filas > 0:
+                btn_exp.configure(bg=ACCENT2, fg="white")
+
+        def _exportar_enc():
+            if self._cf_df_encontradas is None or self._cf_df_encontradas.empty:
+                messagebox.showwarning("Sin datos",
+                    "Primero busca facturas y obtén resultados.", parent=modal)
+                return
+            ruta_out = filedialog.asksaveasfilename(
+                title="Guardar facturas encontradas",
+                defaultextension=".xlsx",
+                filetypes=[("Excel", "*.xlsx"), ("CSV", "*.csv")],
+                initialfile="facturas_consultadas.xlsx")
+            if not ruta_out:
+                return
+            try:
+                df_out = self._cf_df_encontradas
+                if ruta_out.endswith(".csv"):
+                    df_out.to_csv(ruta_out, index=False, encoding="utf-8-sig")
+                else:
+                    df_out.to_excel(ruta_out, index=False)
+                lbl_estado.configure(
+                    text=f"✓ Exportado: {len(df_out)} fila(s) → {ruta_out}", fg=SUCCESS)
+                messagebox.showinfo("Exportado",
+                    f"Archivo guardado:\n{ruta_out}\n\n{len(df_out)} fila(s)", parent=modal)
+            except Exception as ex:
+                messagebox.showerror("Error al exportar", str(ex), parent=modal)
+
+        def _copiar_tabla():
+            cols = list(cf_tree["columns"])
+            if not cols:
+                messagebox.showwarning("Sin datos",
+                    "No hay tabla para copiar. Busca facturas primero.", parent=modal)
+                return
+            filas = ["\t".join(str(c) for c in cols)]
+            for iid in cf_tree.get_children():
+                vals = cf_tree.item(iid, "values")
+                filas.append("\t".join(str(v) for v in vals))
+            texto = "\n".join(filas)
+            modal.clipboard_clear()
+            modal.clipboard_append(texto)
+            modal.update()
+            orig = btn_copiar.cget("text")
+            btn_copiar.configure(text=f"✓ {len(filas)-1} fil. copiadas", bg=SUCCESS)
+            modal.after(1800, lambda: btn_copiar.configure(text=orig, bg="#334155"))
+
+        def _limpiar_modal():
+            self._cf_xl = None
+            self._cf_df = None
+            self._cf_nombre = ""
+            self._cf_df_encontradas = None
+            cf_hoja_var.set("")
+            cf_hoja_combo.configure(values=[], state="disabled")
+            cf_col_combo.configure(values=["— No usar —"])
+            cf_col_var.set("— No usar —")
+            cf_text.delete("1.0", "end")
+            lbl_arch.configure(text="Sin archivo cargado.", fg=TEXT2)
+            lbl_estado.configure(text="", fg=TEXT2)
+            for it in cf_tree.get_children():
+                cf_tree.delete(it)
+            cf_tree.configure(columns=())
+            btn_exp.configure(bg=BG3, fg=TEXT2)
+
+        btn_load.bind("<Button-1>", lambda e: _cargar())
+        cf_hoja_combo.bind("<<ComboboxSelected>>", _on_hoja)
+        btn_buscar.bind("<Button-1>", lambda e: _buscar())
+        btn_exp.bind("<Button-1>", lambda e: _exportar_enc())
+        btn_copiar.bind("<Button-1>", lambda e: _copiar_tabla())
+        btn_limpiar.bind("<Button-1>", lambda e: _limpiar_modal())
