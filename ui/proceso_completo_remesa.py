@@ -1,3 +1,4 @@
+import re
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -51,12 +52,25 @@ class ProcesoCompletoRemesaModule:
             p["rndc_password"] = pw
         return p
 
-    def _consec_efectivo(self):
-        consec = self.var_consec.get().strip()
-        perfil = self._perfil()
+    def _aplicar_prefijo(self, consec, perfil):
+        consec = str(consec).strip()
         if perfil.get("prefijo_remesa") and consec and not consec.startswith("0"):
             consec = "0" + consec
         return consec
+
+    def _consecutivos_lista(self, perfil):
+        """Parsea el campo de consecutivos: acepta varios separados por comas,
+        espacios, punto y coma o saltos de línea (pegables desde una columna).
+        Devuelve la lista en orden, sin duplicados, con el prefijo aplicado."""
+        crudo = self._txt_consec.get("1.0", "end").strip()
+        tokens = re.split(r"[\s,;]+", crudo)
+        out, vistos = [], set()
+        for t in tokens:
+            c = self._aplicar_prefijo(t, perfil)
+            if c and c not in vistos:
+                vistos.add(c)
+                out.append(c)
+        return out
 
     # ── Construcción ──────────────────────────────────────────────────────────
 
@@ -78,13 +92,17 @@ class ProcesoCompletoRemesaModule:
         card.pack(fill=tk.X, pady=(0, 10))
 
         r1 = tk.Frame(card, bg=BG2); r1.pack(fill=tk.X, pady=4)
-        tk.Label(r1, text="Consecutivo remesa:", font=FONT_BODY, bg=BG2, fg=TEXT,
-                 width=22, anchor="w").pack(side=tk.LEFT)
-        self.var_consec = tk.StringVar()
-        tk.Entry(r1, textvariable=self.var_consec, font=FONT_BODY, width=22,
-                 bg=BG3, fg=TEXT, insertbackground=TEXT, relief="flat",
-                 highlightthickness=1, highlightbackground=BORDER,
-                 highlightcolor=ACCENT).pack(side=tk.LEFT)
+        tk.Label(r1, text="Consecutivo(s) remesa:", font=FONT_BODY, bg=BG2, fg=TEXT,
+                 width=22, anchor="nw").pack(side=tk.LEFT, anchor="n")
+        cons_col = tk.Frame(r1, bg=BG2); cons_col.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._txt_consec = tk.Text(cons_col, font=FONT_BODY, width=30, height=3,
+                                   bg=BG3, fg=TEXT, insertbackground=TEXT, relief="flat",
+                                   highlightthickness=1, highlightbackground=BORDER,
+                                   highlightcolor=ACCENT, wrap="word")
+        self._txt_consec.pack(fill=tk.X)
+        tk.Label(cons_col, text="Una o varias: separadas por coma, espacio o salto de línea "
+                                "(pegable desde una columna).",
+                 font=FONT_SMALL, bg=BG2, fg=TEXT2, anchor="w").pack(anchor="w", pady=(2, 0))
 
         r2 = tk.Frame(card, bg=BG2); r2.pack(fill=tk.X, pady=4)
         tk.Label(r2, text="Nuevo NIT generador:", font=FONT_BODY, bg=BG2, fg=TEXT,
@@ -161,7 +179,7 @@ class ProcesoCompletoRemesaModule:
             pass
 
     def _limpiar(self):
-        self.var_consec.set("")
+        self._txt_consec.delete("1.0", "end")
         self.var_nit.set(self.NITS_GENERADOR[0])
         self.var_sede.set("1")
         self.var_tipoid.set(self.TIPOID[0])
@@ -219,12 +237,14 @@ class ProcesoCompletoRemesaModule:
     # ── Ejecutar ────────────────────────────────────────────────────────────────
 
     def _ejecutar(self):
-        consec = self._consec_efectivo()
-        if not consec:
-            messagebox.showwarning("Sin consecutivo", "Escribe el consecutivo de la remesa.")
-            return
         if not self.perfil_fn:
             messagebox.showerror("Sin perfil", "No hay perfil activo.")
+            return
+        perfil = self._perfil()
+        consecutivos = self._consecutivos_lista(perfil)
+        if not consecutivos:
+            messagebox.showwarning("Sin consecutivo",
+                "Escribe al menos un consecutivo de remesa.")
             return
         nit_nuevo = self.var_nit.get().strip()
         if not nit_nuevo:
@@ -235,11 +255,12 @@ class ProcesoCompletoRemesaModule:
         tipoid = self.var_tipoid.get().strip().split(" ")[0]   # "N — ..." → "N"
         cod_anul = self.var_mot_anul.get().strip().split(" ")[0]
         cod_camb = self.var_mot_camb.get().strip().split(" ")[0]
-        perfil = self._perfil()
 
+        n = len(consecutivos)
+        lista_txt = ", ".join(consecutivos) if n <= 10 else f"{n} remesas"
         if not messagebox.askyesno(
                 "Confirmar proceso completo",
-                f"¿Ejecutar TODO el proceso para la remesa {consec}?\n\n"
+                f"¿Ejecutar TODO el proceso para {n} remesa(s)?\n({lista_txt})\n\n"
                 f"1. Anular cumplido (si estaba cumplida, motivo {cod_anul})\n"
                 f"2. Cambiar generador → NIT {nit_nuevo} (sede {sede}, motivo {cod_camb})\n"
                 f"3. Volver a cumplir (si la remesa tiene manifiesto y datos)\n\n"
@@ -247,8 +268,38 @@ class ProcesoCompletoRemesaModule:
             return
 
         self._limpiar_log()
-        self._put(f"▶ Proceso completo para remesa {consec}", "step")
+        self._put(f"▶ Proceso completo para {n} remesa(s)", "step")
 
+        resumen = {"ok": 0, "ok_sin_cumplido": 0, "error": 0}
+        fallidas = []
+        for i, consec in enumerate(consecutivos, 1):
+            self._put("", "info")
+            self._put(f"═══ [{i}/{n}] Remesa {consec} ═══", "step")
+            estado = self._procesar_remesa(consec, nit_nuevo, sede, tipoid,
+                                           cod_anul, cod_camb, perfil)
+            resumen[estado] = resumen.get(estado, 0) + 1
+            if estado == "error":
+                fallidas.append(consec)
+
+        self._put("", "info")
+        self._put(f"════════ RESUMEN ════════", "step")
+        self._put(f"  ✓ Completas (con re-cumplido): {resumen['ok']}", "ok")
+        self._put(f"  ✓ Generador cambiado sin cumplido: {resumen['ok_sin_cumplido']}", "ok")
+        self._put(f"  ✗ Con error: {resumen['error']}",
+                  "err" if resumen["error"] else "info")
+        if fallidas:
+            self._put(f"  Remesas con error: {', '.join(fallidas)}", "err")
+
+        messagebox.showinfo("Proceso completo",
+            f"Procesadas {n} remesa(s):\n"
+            f"• Completas: {resumen['ok']}\n"
+            f"• Generador cambiado sin cumplido: {resumen['ok_sin_cumplido']}\n"
+            f"• Con error: {resumen['error']}"
+            + (f"\n\nCon error: {', '.join(fallidas)}" if fallidas else ""))
+
+    # ── Procesamiento de UNA remesa (devuelve 'ok'|'ok_sin_cumplido'|'error') ────
+
+    def _procesar_remesa(self, consec, nit_nuevo, sede, tipoid, cod_anul, cod_camb, perfil):
         # 1. Capturar tiempos del cumplido (proceso 5) — ANTES de anular
         self._put("1) Consultando cumplido actual (proceso 5)…")
         ok5, res5 = consultar_remesa_completa(consec, perfil, procesoid=5)
@@ -262,8 +313,8 @@ class ProcesoCompletoRemesaModule:
         self._put("2) Consultando datos de la remesa (proceso 3)…")
         ok3, res3 = consultar_remesa_completa(consec, perfil, procesoid=3)
         if not ok3:
-            self._put(f"   ✗ No se pudo consultar la remesa: {res3}. Proceso abortado.", "err")
-            return
+            self._put(f"   ✗ No se pudo consultar la remesa: {res3}. Remesa omitida.", "err")
+            return "error"
         self._put("   ✓ Remesa consultada.", "ok")
 
         # Estado de la remesa: ¿tiene manifiesto asignado? ¿estaba cumplida?
@@ -300,20 +351,20 @@ class ProcesoCompletoRemesaModule:
                     okM, resM = anular_cumplido_manifiesto(manifiesto, cod_anul, perfil)
                     if not okM:
                         self._put(f"   ✗ Falló la anulación del manifiesto: {resM}. "
-                                  "Proceso abortado.", "err")
-                        return
+                                  "Remesa omitida.", "err")
+                        return "error"
                     self._put(f"   ✓ Cumplido del manifiesto anulado "
                               f"(radicado {resM.get('ingresoid','?')}).", "ok")
                     self._put("   ↻ Reintentando anular el cumplido de la remesa…", "info")
                     okA, resA = anular_cumplido_remesa(consec, cod_anul, perfil)
                     if not okA:
                         self._put(f"   ✗ Aún falló la anulación de la remesa: {resA}. "
-                                  "Proceso abortado.", "err")
-                        return
+                                  "Remesa omitida.", "err")
+                        return "error"
                 else:
                     self._put("   ✗ La remesa no tiene manifiesto asociado para anular. "
-                              "Proceso abortado.", "err")
-                    return
+                              "Remesa omitida.", "err")
+                    return "error"
             self._put(f"   ✓ Cumplido anulado (radicado {resA.get('ingresoid','?')}).", "ok")
         else:
             self._put("3) La remesa no estaba cumplida → se omite la anulación.", "info")
@@ -333,9 +384,9 @@ class ProcesoCompletoRemesaModule:
         var_corr["CODIGOCAMBIO"] = "4"   # Cambio de Generador
         okC, resC = corregir_remesa(var_corr, perfil)
         if not okC:
-            self._put(f"   ✗ Falló la corrección: {resC}. Proceso abortado "
-                      "(la remesa quedó descumplida; corrige/cumple a mano).", "err")
-            return
+            self._put(f"   ✗ Falló la corrección: {resC}. Remesa omitida "
+                      "(quedó descumplida; corrige/cumple a mano).", "err")
+            return "error"
         self._put(f"   ✓ Generador cambiado (radicado {resC.get('ingresoid','?')}).", "ok")
 
         # 5. Re-cumplir (proceso 5) — solo si es posible
@@ -343,11 +394,8 @@ class ProcesoCompletoRemesaModule:
             motivo = ("la remesa no tiene manifiesto asignado"
                       if sin_manifiesto else "no hay tiempos ni citas")
             self._put(f"5) Cumplido OMITIDO: {motivo}.", "info")
-            self._put("✔ PROCESO FINALIZADO: generador cambiado (sin cumplido).", "ok")
-            messagebox.showinfo("Proceso completo",
-                f"Remesa {consec}:\n• Generador → {nit_nuevo}\n"
-                f"• Cumplido omitido ({motivo}).")
-            return
+            self._put(f"✔ Remesa {consec}: generador cambiado (sin cumplido).", "ok")
+            return "ok_sin_cumplido"
 
         self._put(f"5) Re-cumpliendo remesa ({desc_plan})…")
         cant = res3.get("cantidadcargada", "") or res5.get("cantidadcargada", "") \
@@ -366,10 +414,7 @@ class ProcesoCompletoRemesaModule:
         if not okU:
             self._put(f"   ✗ Falló el re-cumplido: {resU}. La remesa quedó con el "
                       "generador cambiado pero SIN cumplir (cúmplela a mano).", "err")
-            return
+            return "error"
         self._put(f"   ✓ Remesa cumplida de nuevo (radicado {resU.get('ingresoid','?')}).", "ok")
-
-        self._put("✔ PROCESO COMPLETO FINALIZADO CORRECTAMENTE.", "ok")
-        messagebox.showinfo("Proceso completo",
-            f"Remesa {consec} procesada:\n"
-            f"• Cumplido anulado\n• Generador → {nit_nuevo}\n• Re-cumplida ({tipo})")
+        self._put(f"✔ Remesa {consec} procesada completamente.", "ok")
+        return "ok"
