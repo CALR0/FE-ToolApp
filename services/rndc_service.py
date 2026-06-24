@@ -489,6 +489,34 @@ def anular_cumplido_remesa(consecutivo_remesa, cod_motivo, perfil, timeout=20):
     return _enviar_proceso_rndc(28, variables, perfil, timeout)
 
 
+def anular_cumplido_manifiesto(num_manifiesto, cod_motivo, perfil, observaciones="", timeout=20):
+    """
+    Anula el cumplido de un manifiesto en el RNDC (proceso 29, tipo 1).
+
+    Campos que exige el formulario del RNDC (AnularCumplidoManifiesto):
+        NUMNITEMPRESATRANSPORTE    (del perfil: nit_socio)
+        NUMMANIFIESTOCARGA         (número del manifiesto de carga)
+        CODMOTIVOANULACIONCUMPLIDO ('D' = Error Digitación, 'O' = Otro)
+        OBSERVACIONES              (opcional)
+
+    Parámetros:
+        num_manifiesto : str
+        cod_motivo     : str  — 'D' o 'O'
+        perfil         : dict — usa rndc_usuario / rndc_password / nit_socio.
+        observaciones  : str  — opcional.
+
+    Retorna (ok, {ingresoid}) o (False, mensaje_error).
+    """
+    variables = {
+        "NUMNITEMPRESATRANSPORTE":    perfil.get("nit_socio", ""),
+        "NUMMANIFIESTOCARGA":         str(num_manifiesto).strip(),
+        "CODMOTIVOANULACIONCUMPLIDO": str(cod_motivo).strip(),
+    }
+    if str(observaciones).strip():
+        variables["OBSERVACIONES"] = str(observaciones).strip()
+    return _enviar_proceso_rndc(29, variables, perfil, timeout)
+
+
 def cumplir_remesa(variables, perfil, timeout=20):
     """
     Cumple una remesa en el RNDC (proceso 5, tipo 1).

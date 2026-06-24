@@ -24,6 +24,7 @@ from ui.corregir_remesa import CorregirRemesaModule
 from ui.anular_cumplido_remesa import AnularCumplidoRemesaModule
 from ui.cumplir_remesa import CumplirRemesaModule
 from ui.proceso_completo_remesa import ProcesoCompletoRemesaModule
+from ui.anular_cumplido_manifiesto import AnularCumplidoManifiestoModule
 
 
 class GeneradorApp:
@@ -288,6 +289,63 @@ class GeneradorApp:
                 _rem_grp_arr.configure(bg=BG2),
             ))
 
+        # ── Grupo colapsable "Manifiesto" ─────────────────────────────────────
+        _man_expanded = tk.BooleanVar(value=False)
+
+        _man_grp_frm = tk.Frame(sidebar, bg=BG2, cursor="hand2")
+        _man_grp_frm.pack(fill=tk.X, padx=6, pady=2)
+        _man_grp_ic  = tk.Label(_man_grp_frm, text="📑", font=("Segoe UI Emoji", 13),
+                                bg=BG2, fg=TEXT2, width=2)
+        _man_grp_ic.pack(side=tk.LEFT, padx=(6,4), pady=8)
+        _man_grp_lbl = tk.Label(_man_grp_frm, text="Manifiesto", font=FONT_BODY,
+                                bg=BG2, fg=TEXT2, anchor="w")
+        _man_grp_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        _man_grp_arr = tk.Label(_man_grp_frm, text="▶", font=("Segoe UI", 8),
+                                bg=BG2, fg=TEXT2)
+        _man_grp_arr.pack(side=tk.RIGHT, padx=(0,8))
+
+        _man_sub_frame = tk.Frame(sidebar, bg=BG2)
+
+        def _mk_man_sub_btn(key, icono, label):
+            frm = tk.Frame(_man_sub_frame, bg=BG2, cursor="hand2")
+            frm.pack(fill=tk.X, padx=6, pady=1)
+            tk.Frame(frm, bg=BG2, width=18).pack(side=tk.LEFT)
+            ic  = tk.Label(frm, text=icono, font=("Segoe UI Emoji", 11),
+                           bg=BG2, fg=TEXT2, width=2)
+            ic.pack(side=tk.LEFT, padx=(2,3), pady=6)
+            lbl = tk.Label(frm, text=label, font=("Segoe UI", 9),
+                           bg=BG2, fg=TEXT2, anchor="w", justify="left", wraplength=110)
+            lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            self._nav_buttons[key] = (frm, ic, lbl)
+            return frm, ic, lbl
+
+        _mk_man_sub_btn("anular_cumplido_manifiesto", "🗑", "Anular cumplido manifiesto")
+
+        def _toggle_manifiesto(e=None):
+            if _man_expanded.get():
+                _man_sub_frame.pack_forget()
+                _man_expanded.set(False)
+                _man_grp_arr.configure(text="▶")
+            else:
+                _man_sub_frame.pack(fill=tk.X, after=_man_grp_frm)
+                _man_expanded.set(True)
+                _man_grp_arr.configure(text="▼")
+
+        for w in (_man_grp_frm, _man_grp_ic, _man_grp_lbl, _man_grp_arr):
+            w.bind("<Button-1>", _toggle_manifiesto)
+            w.bind("<Enter>", lambda e: (
+                _man_grp_frm.configure(bg="#1a1e30"),
+                _man_grp_ic.configure(bg="#1a1e30"),
+                _man_grp_lbl.configure(bg="#1a1e30"),
+                _man_grp_arr.configure(bg="#1a1e30"),
+            ))
+            w.bind("<Leave>", lambda e: (
+                _man_grp_frm.configure(bg=BG2),
+                _man_grp_ic.configure(bg=BG2),
+                _man_grp_lbl.configure(bg=BG2),
+                _man_grp_arr.configure(bg=BG2),
+            ))
+
         # ── Grupo colapsable "Otros" ──────────────────────────────────────────
         _otros_expanded = tk.BooleanVar(value=False)
 
@@ -385,6 +443,12 @@ class GeneradorApp:
                     _rem_sub_frame.pack(fill=tk.X, after=_rem_grp_frm)
                     _rem_expanded.set(True)
                     _rem_grp_arr.configure(text="▼")
+            # Expandir el grupo Manifiesto automáticamente si estaba cerrado
+            if key in ("anular_cumplido_manifiesto",):
+                if not _man_expanded.get():
+                    _man_sub_frame.pack(fill=tk.X, after=_man_grp_frm)
+                    _man_expanded.set(True)
+                    _man_grp_arr.configure(text="▼")
             # Expandir el grupo Otros automáticamente si estaba cerrado
             if key in ("editar","reconstruir","extraer_rg","cruzar_remesas"):
                 if not _otros_expanded.get():
@@ -405,7 +469,8 @@ class GeneradorApp:
         self._nav_activate["extraer_rg"]          = lambda: _show_panel("extraer_rg")
         self._nav_activate["cruzar_remesas"]      = lambda: _show_panel("cruzar_remesas")
         self._nav_activate["proceso_completo"]    = lambda: _show_panel("proceso_completo")
-        for key in ("generar","excel","rndc","editar","reconstruir","consultar_remesas","corregir_remesa","anular_cumplido","cumplir_remesa","extraer_rg","cruzar_remesas","proceso_completo"):
+        self._nav_activate["anular_cumplido_manifiesto"] = lambda: _show_panel("anular_cumplido_manifiesto")
+        for key in ("generar","excel","rndc","editar","reconstruir","consultar_remesas","corregir_remesa","anular_cumplido","cumplir_remesa","extraer_rg","cruzar_remesas","proceso_completo","anular_cumplido_manifiesto"):
             frm, ic, lbl = self._nav_buttons[key]
             act = self._nav_activate[key]
             for w in (frm, ic, lbl):
@@ -713,6 +778,26 @@ class GeneradorApp:
         _cv_pc.bind("<Leave>", lambda e: _cv_pc.unbind_all("<MouseWheel>"))
         self._proceso_completo_module = ProcesoCompletoRemesaModule(perfil_fn=self._perfil_activo)
         self._proceso_completo_module._build(container=_inner_pc)
+
+        # ─── Panel 13: Anular cumplido manifiesto (RNDC proceso 29) ────────────
+        panel_acm = tk.Frame(content_area, bg=BG)
+        self._nav_panels["anular_cumplido_manifiesto"] = panel_acm
+        _wrap_acm = tk.Frame(panel_acm, bg=BG)
+        _wrap_acm.pack(fill=tk.BOTH, expand=True)
+        _cv_acm = tk.Canvas(_wrap_acm, bg=BG, highlightthickness=0)
+        _sb_acm = ttk.Scrollbar(_wrap_acm, orient="vertical", command=_cv_acm.yview)
+        _cv_acm.configure(yscrollcommand=_sb_acm.set)
+        _sb_acm.pack(side=tk.RIGHT, fill=tk.Y)
+        _cv_acm.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        _inner_acm = tk.Frame(_cv_acm, bg=BG)
+        _cwin_acm = _cv_acm.create_window((0, 0), window=_inner_acm, anchor="nw")
+        _inner_acm.bind("<Configure>", lambda e: _cv_acm.configure(scrollregion=_cv_acm.bbox("all")))
+        _cv_acm.bind("<Configure>", lambda e: _cv_acm.itemconfig(_cwin_acm, width=e.width))
+        _cv_acm.bind("<Enter>", lambda e: _cv_acm.bind_all("<MouseWheel>",
+            lambda ev: _cv_acm.yview_scroll(int(-1*(ev.delta/120)), "units")))
+        _cv_acm.bind("<Leave>", lambda e: _cv_acm.unbind_all("<MouseWheel>"))
+        self._anular_cumplido_manifiesto_module = AnularCumplidoManifiestoModule(perfil_fn=self._perfil_activo)
+        self._anular_cumplido_manifiesto_module._build(container=_inner_acm)
 
         # Activar panel inicial
         root.after(50, lambda: _show_panel("generar"))

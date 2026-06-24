@@ -48,6 +48,7 @@ testap/
 │   ├── cruzar_remesas.py          ← CruzarRemesasModule: cruza el Excel de "Extraer Datos RG" con otro Excel externo
 │   ├── corregir_remesa.py         ← CorregirRemesaModule: consulta y corrige una remesa en el RNDC (proceso 38)
 │   ├── anular_cumplido_remesa.py  ← AnularCumplidoRemesaModule: anula el cumplido de una remesa (proceso 28)
+│   ├── anular_cumplido_manifiesto.py ← AnularCumplidoManifiestoModule: anula el cumplido de un manifiesto (proceso 29)
 │   └── cumplir_remesa.py          ← CumplirRemesaModule: cumple una remesa (proceso 5), tiempos automáticos
 │
 ├── utils/                         ← Utilidades transversales
@@ -82,8 +83,8 @@ main.py          → importa de ui/
 Ventana principal. Construye:
 - **Header** con logo FE-Tool
 - **Pill bar** de selección de perfil (ut_tsp / ut_elogia)
-- **Sidebar** con grupos colapsables: Facturación / Remesas / Otros
-- **12 paneles** de contenido (uno por módulo), mostrados/ocultados con `pack/pack_forget`
+- **Sidebar** con grupos colapsables: Facturación / Remesas / Manifiesto / Otros
+- **13 paneles** de contenido (uno por módulo), mostrados/ocultados con `pack/pack_forget`
 - **Barra de estado** inferior
 
 Al cambiar de perfil notifica activamente a `_rndc_uploader`, `_excel_loader` y `_reconstruir_module`.
@@ -183,6 +184,9 @@ Detalles importantes:
 ### `ui/anular_cumplido_remesa.py` — AnularCumplidoRemesaModule
 Anula el cumplido de una remesa en el RNDC vía **proceso 28** (`tipo=1`). Flujo: escribir consecutivo → **Consultar remesa** (`consultar_remesa_completa`, muestra datos para confirmar) → elegir **Motivo de anulación** → **Guardar anulación** con confirmación. Campos enviados: `NUMNITEMPRESATRANSPORTE`, `CONSECUTIVOREMESA`, `CODMOTIVOANULACIONCUMPLIDO` (`D`=Error Digitación, `O`=Otro). Usa las **mismas credenciales de corrección** (`rndc_usuario_corregir`) y el endpoint `rndcws`, igual que corregir remesa.
 
+### `ui/anular_cumplido_manifiesto.py` — AnularCumplidoManifiestoModule
+Anula el cumplido de un **manifiesto** en el RNDC vía **proceso 29** (`tipo=1`), bajo el grupo de sidebar **"Manifiesto"**. Flujo simple (sin paso de consulta): escribir **N° de manifiesto** → elegir **Motivo de anulación** (`D`=Error Digitación, `O`=Otro) → **Observaciones** (opcional) → **Guardar** con confirmación. Campos enviados: `NUMNITEMPRESATRANSPORTE` (del perfil), `NUMMANIFIESTOCARGA`, `CODMOTIVOANULACIONCUMPLIDO`, y `OBSERVACIONES` (solo si se llena). Usa las **mismas credenciales de corrección** (`rndc_usuario_corregir`) y el endpoint `rndcws`, igual que anular cumplido remesa. Botón **"🗑 Limpiar"**.
+
 ### `ui/cumplir_remesa.py` — CumplirRemesaModule
 Cumple una remesa en el RNDC vía **proceso 5** (`tipo=1`). Consultar → elegir **Tipo de Cumplido** → los tiempos se **auto-calculan** y quedan en campos **editables** (por si el usuario tiene los datos reales) → guardar (con confirmación). Cantidades siempre automáticas.
 
@@ -209,6 +213,8 @@ Nombres de variables del proceso 5: `TIPOCUMPLIDOREMESA` (`C`/`S`), `CANTIDADINF
 **Árbol de re-cumplido** (`_plan_cumplido`): si el proceso 5 trae tiempos reales → Normal (cargue+descargue) o Suspensión (solo cargue); si no, calcula de citas (proceso 3) → Normal si hay cita cargue+descargue, Suspensión si solo cargue.
 
 **Cumplido condicional (no aborta):** el objetivo principal es **corregir el generador**, así que el corregir SIEMPRE se intenta. El cumplido (paso 5) se **omite con gracia** cuando no es posible: si la remesa está **Pendiente de asignar manifiesto** (`nummanifiestocarga` vacío en proceso 3 → `sin_manifiesto`), o si no hay tiempos ni citas (`_plan_cumplido` devuelve None). En esos casos corrige y termina informando que el cumplido quedó omitido.
+
+**Anulación con fallback al manifiesto (paso 3):** si la anulación del cumplido de la remesa (proceso 28) falla —caso típico: el **manifiesto asociado está cumplido**— y la remesa tiene `nummanifiestocarga`, se **anula primero el cumplido del manifiesto** (`anular_cumplido_manifiesto`, proceso 29, mismo `cod_anul`) y se **reintenta** la anulación de la remesa. Si el reintento o la anulación del manifiesto fallan, se aborta. Si la remesa no tiene manifiesto asociado, se aborta directamente. El resto del proceso (corregir + re-cumplir) sigue igual.
 
 **Sin rollback**: si un paso falla, **se detiene** y el log indica en qué punto quedó (para terminar a mano con los módulos paso-a-paso). **Reutiliza** funciones de servicio y constantes (`CorregirRemesaModule.BASE_FIELDS`, `CumplirRemesaModule.CARGUE_ROWS/DESCARGUE_ROWS/_fecha_hora_mas`) sin modificar esos módulos.
 
@@ -243,6 +249,7 @@ Cada perfil tiene:
 | `consultar_remesa_completa(consecutivo, perfil, procesoid=3)` | `services/rndc_service.py` | `tipo=3` / `variables=*`. `procesoid=3`→datos de la remesa (citas); `procesoid=5`→datos del cumplido (tiempos reales). Retorna `(ok, dict)` con todos los campos |
 | `corregir_remesa(variables, perfil)` | `services/rndc_service.py` | Proceso 38 / `tipo=1`. Envía a `rndcws.mintransporte.gov.co:8080` (sin "2"). `variables` es dict (orden respetado). Retorna `(ok, {ingresoid})` |
 | `anular_cumplido_remesa(consecutivo, cod_motivo, perfil)` | `services/rndc_service.py` | Proceso 28 / `tipo=1`. Anula cumplido. `cod_motivo`: `D`=Error Digitación, `O`=Otro. Mismo endpoint que corregir |
+| `anular_cumplido_manifiesto(num_manifiesto, cod_motivo, perfil, observaciones="")` | `services/rndc_service.py` | Proceso 29 / `tipo=1`. Anula cumplido de manifiesto. Variables: `NUMNITEMPRESATRANSPORTE`, `NUMMANIFIESTOCARGA`, `CODMOTIVOANULACIONCUMPLIDO`, `OBSERVACIONES` (opcional). Mismo endpoint/credenciales que corregir |
 | `cumplir_remesa(variables, perfil)` | `services/rndc_service.py` | Proceso 5 / `tipo=1`. Registra cumplido; `variables` dict. Mismo endpoint/credenciales que corregir |
 | `_enviar_proceso_rndc(procesoid, variables, perfil)` | `services/rndc_service.py` | Envío genérico tipo=1 a `rndcws` (usado por corregir 38, anular 28, cumplir 5) |
 | `resource_path(relative)` | `utils/helpers.py` | Resuelve rutas para PyInstaller: sube un nivel desde `utils/` para encontrar archivos en la raíz |

@@ -7,7 +7,7 @@ from config.theme import (
 )
 from services.rndc_service import (
     consultar_remesa_completa, anular_cumplido_remesa,
-    corregir_remesa, cumplir_remesa,
+    anular_cumplido_manifiesto, corregir_remesa, cumplir_remesa,
 )
 from ui.corregir_remesa import CorregirRemesaModule
 from ui.cumplir_remesa import CumplirRemesaModule
@@ -290,8 +290,30 @@ class ProcesoCompletoRemesaModule:
             self._put(f"3) Anulando cumplido (proceso 28, motivo {cod_anul})…")
             okA, resA = anular_cumplido_remesa(consec, cod_anul, perfil)
             if not okA:
-                self._put(f"   ✗ Falló la anulación: {resA}. Proceso abortado.", "err")
-                return
+                # Caso típico: no se puede anular el cumplido de la remesa porque el
+                # manifiesto asociado está cumplido. Se anula primero el cumplido del
+                # manifiesto (proceso 29) y se reintenta la anulación de la remesa.
+                self._put(f"   ⚠ No se pudo anular el cumplido de la remesa: {resA}", "err")
+                if manifiesto:
+                    self._put(f"   ↻ Intentando anular primero el cumplido del manifiesto "
+                              f"{manifiesto} (proceso 29, motivo {cod_anul})…", "info")
+                    okM, resM = anular_cumplido_manifiesto(manifiesto, cod_anul, perfil)
+                    if not okM:
+                        self._put(f"   ✗ Falló la anulación del manifiesto: {resM}. "
+                                  "Proceso abortado.", "err")
+                        return
+                    self._put(f"   ✓ Cumplido del manifiesto anulado "
+                              f"(radicado {resM.get('ingresoid','?')}).", "ok")
+                    self._put("   ↻ Reintentando anular el cumplido de la remesa…", "info")
+                    okA, resA = anular_cumplido_remesa(consec, cod_anul, perfil)
+                    if not okA:
+                        self._put(f"   ✗ Aún falló la anulación de la remesa: {resA}. "
+                                  "Proceso abortado.", "err")
+                        return
+                else:
+                    self._put("   ✗ La remesa no tiene manifiesto asociado para anular. "
+                              "Proceso abortado.", "err")
+                    return
             self._put(f"   ✓ Cumplido anulado (radicado {resA.get('ingresoid','?')}).", "ok")
         else:
             self._put("3) La remesa no estaba cumplida → se omite la anulación.", "info")
