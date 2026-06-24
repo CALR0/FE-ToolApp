@@ -88,7 +88,7 @@ class GeneradorApp:
                  bg=BG2, fg=ACCENT).pack(side=tk.LEFT, padx=(0, 6))
         tk.Label(hdr_inner, text="FE-Tool",
                  font=FONT_H1, bg=BG2, fg=TEXT).pack(side=tk.LEFT)
-        tk.Label(hdr_inner, text="  V1.4",
+        tk.Label(hdr_inner, text="  V1.5",
                  font=("Segoe UI", 9), bg=BG2, fg=TEXT2).pack(side=tk.LEFT, pady=4)
 
         # ── Selector de perfil (pill bar bajo el header) ──────────────────────
@@ -407,7 +407,7 @@ class GeneradorApp:
             ))
 
         tk.Frame(sidebar, bg=BORDER, height=1).pack(fill=tk.X, padx=10, pady=8)
-        tk.Label(sidebar, text="V1.4", font=("Segoe UI", 8),
+        tk.Label(sidebar, text="V1.5", font=("Segoe UI", 8),
                  bg=BG2, fg=BORDER).pack(side=tk.BOTTOM, pady=8)
 
         # ── Área de contenido ─────────────────────────────────────────────────

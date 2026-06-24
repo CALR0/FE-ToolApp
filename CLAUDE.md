@@ -77,7 +77,7 @@ main.py          → importa de ui/
 
 ## Módulos UI — qué hace cada uno
 
-> Convenciones de UI comunes: los módulos con tabla (`consultar_remesas` incl. modal masivo, `editar_xml`, `rndc_uploader`) tienen botón **"📋 Copiar tabla"** que vuelca encabezados+filas al portapapeles como TSV (pegable en Excel). En `consultar_remesas` (tabla + modal) y `rndc_uploader` (facturas + remesas), **doble clic en una celda** abre un campo con el texto seleccionado para copiar (helper `_hacer_celda_copiable`). Los módulos de remesa RNDC (`corregir_remesa`, `anular_cumplido_remesa`, `cumplir_remesa`, `proceso_completo_remesa`) tienen botón **"🗑 Limpiar"** que resetea consecutivo, campos, combos a default y estado. La versión de la app (header y sidebar de `app.py`) es **V1.4**.
+> Convenciones de UI comunes: los módulos con tabla (`consultar_remesas` incl. modal masivo, `editar_xml`, `rndc_uploader`) tienen botón **"📋 Copiar tabla"** que vuelca encabezados+filas al portapapeles como TSV (pegable en Excel). En `consultar_remesas` (tabla + modal) y `rndc_uploader` (facturas + remesas), **doble clic en una celda** abre un campo con el texto seleccionado para copiar (helper `_hacer_celda_copiable`). Los módulos de remesa RNDC (`corregir_remesa`, `anular_cumplido_remesa`, `cumplir_remesa`, `proceso_completo_remesa`) tienen botón **"🗑 Limpiar"** que resetea consecutivo, campos, combos a default y estado. La versión de la app (header y sidebar de `app.py`) es **V1.5**.
 
 ### `ui/app.py` — GeneradorApp
 Ventana principal. Construye:
