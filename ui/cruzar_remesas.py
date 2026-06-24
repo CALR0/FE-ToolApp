@@ -834,9 +834,16 @@ class CruzarRemesasModule:
             for c0 in cols:
                 cf_tree.heading(c0, text=c0)
                 cf_tree.column(c0, width=130, anchor="center", stretch=False)
+            def _fmt_cell(v):
+                # Float entero (11519464.0) → "11519464"; NaN → ""; resto sin tocar.
+                if pd.isna(v):
+                    return ""
+                if isinstance(v, float) and v.is_integer():
+                    return str(int(v))
+                return v
             for _, row in df_enc.iterrows():
                 cf_tree.insert("", "end",
-                    values=[("" if pd.isna(v) else v) for v in row.tolist()])
+                    values=[_fmt_cell(v) for v in row.tolist()])
 
             n_enc = len(encontradas)
             n_filas = len(df_enc)
