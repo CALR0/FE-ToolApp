@@ -89,6 +89,9 @@ class CruzarRemesasModule:
         self.cols_otro = ["— No usar —"]
         self.vars = {}
         self.combos = {}
+        # Claves cuyo mapeo eligió MANUALMENTE el usuario: el auto-mapeo no las
+        # sobreescribe si su columna sigue existiendo en la hoja/archivo.
+        self._mapeo_manual = set()
         # ExcelFile, selector de hoja y nombre de archivo por fuente ("rg"/"otro")
         self._xl_files   = {"rg": None, "otro": None}
         self._hoja_vars  = {}
@@ -150,6 +153,7 @@ class CruzarRemesasModule:
         self._hoja_combos["rg"].pack(side=tk.LEFT, padx=(0, 10))
         self._hoja_combos["rg"].bind(
             "<<ComboboxSelected>>", lambda e: self._on_hoja_change("rg"))
+        self._anti_wheel_combo(self._hoja_combos["rg"])
         self._lbl_rg = tk.Label(fila_rg, text="Sin archivo cargado.",
                                 font=FONT_BODY, bg=BG2, fg=TEXT2, anchor="w")
         self._lbl_rg.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -170,6 +174,7 @@ class CruzarRemesasModule:
         self._hoja_combos["otro"].pack(side=tk.LEFT, padx=(0, 10))
         self._hoja_combos["otro"].bind(
             "<<ComboboxSelected>>", lambda e: self._on_hoja_change("otro"))
+        self._anti_wheel_combo(self._hoja_combos["otro"])
         self._lbl_otro = tk.Label(fila_otro, text="Sin archivo cargado.",
                                   font=FONT_BODY, bg=BG2, fg=TEXT2, anchor="w")
         self._lbl_otro.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -200,9 +205,11 @@ class CruzarRemesasModule:
         tk.Label(act_row, text="Filtro:", font=FONT_BODY, bg=BG, fg=TEXT2
                  ).pack(side=tk.LEFT, padx=(0, 4))
         self._filtro_var = tk.StringVar(value=self.FILTROS_EXPORT[0])
-        ttk.Combobox(act_row, textvariable=self._filtro_var,
+        _filtro_exp_combo = ttk.Combobox(act_row, textvariable=self._filtro_var,
                      values=self.FILTROS_EXPORT, state="readonly",
-                     font=FONT_BODY, width=34).pack(side=tk.LEFT, padx=(0, 10))
+                     font=FONT_BODY, width=34)
+        _filtro_exp_combo.pack(side=tk.LEFT, padx=(0, 10))
+        self._anti_wheel_combo(_filtro_exp_combo)
 
         self._btn_exportar = tk.Label(act_row, text="💾  Exportar Excel",
                                       font=FONT_BODY, bg=BG3, fg=TEXT2,
@@ -253,6 +260,24 @@ class CruzarRemesasModule:
         self._tree.tag_configure("err", foreground="#f87171", background=BG2)
         self._tree.tag_configure("alt", background=BG3)
 
+    @staticmethod
+    def _anti_wheel_combo(combo):
+        """Evita el bug de ttk.Combobox donde el scroll del mouse CAMBIA su valor.
+        Intercepta la rueda: no cambia el valor y desplaza el Canvas ancestro."""
+        def _on_wheel(e):
+            w = combo.master
+            while w is not None and not isinstance(w, tk.Canvas):
+                w = getattr(w, "master", None)
+            if isinstance(w, tk.Canvas):
+                try:
+                    w.yview_scroll(int(-1 * (e.delta / 120)), "units")
+                except Exception:
+                    pass
+            return "break"
+        combo.bind("<MouseWheel>", _on_wheel)
+        combo.bind("<Button-4>", lambda e: (_on_wheel(e), "break")[1])
+        combo.bind("<Button-5>", lambda e: (_on_wheel(e), "break")[1])
+
     def _build_grid(self, grid, campos):
         for ci, txt in enumerate(("Campo", "Columna del Excel")):
             tk.Label(grid, text=txt, font=FONT_H2, bg=BG2, fg=TEXT2
@@ -273,6 +298,10 @@ class CruzarRemesasModule:
                                  state="readonly", font=FONT_BODY, width=30)
             combo.pack(side=tk.LEFT, padx=(0, 12), pady=5)
             self.combos[clave] = combo
+            self._anti_wheel_combo(combo)
+            # Marcar selección MANUAL para que el auto-mapeo no la sobreescriba.
+            combo.bind("<<ComboboxSelected>>",
+                       lambda e, k=clave: self._mapeo_manual.add(k))
 
     # ── Carga de archivos ────────────────────────────────────────────────────
 
@@ -284,6 +313,10 @@ class CruzarRemesasModule:
             return
 
         self._nombre_archivo[cual] = ruta.split("/")[-1].split(chr(92))[-1]
+        # Archivo nuevo → olvidar las marcas manuales de las claves de esa fuente
+        campos_cual = self.CAMPOS_RG if cual == "rg" else self.CAMPOS_OTRO
+        for clave, _, _ in campos_cual:
+            self._mapeo_manual.discard(clave)
         combo_hoja = self._hoja_combos[cual]
 
         # CSV: no tiene hojas, se deshabilita el selector
@@ -352,10 +385,14 @@ class CruzarRemesasModule:
                 text=f"{self._nombre_archivo['otro']}  ·  {info_hoja}{len(df)} filas", fg=TEXT)
             campos = self.CAMPOS_OTRO
 
+        cols_actuales = df.columns.astype(str).tolist()
         for clave, _, _ in campos:
             combo = self.combos[clave]
             combo.configure(values=cols)
             var = self.vars[clave]
+            # Preservar selección manual si su columna sigue existiendo en la hoja nueva
+            if clave in self._mapeo_manual and var.get() in cols_actuales:
+                continue
             matched = False
             for col in df.columns.astype(str):
                 col_norm = col.lower().replace(" ", "_").replace("°", "")
@@ -771,6 +808,7 @@ class CruzarRemesasModule:
         cf_hoja_combo = ttk.Combobox(fila1, textvariable=cf_hoja_var, values=[],
                                      state="disabled", font=FONT_BODY, width=22)
         cf_hoja_combo.pack(side=tk.LEFT, padx=(0, 10))
+        self._anti_wheel_combo(cf_hoja_combo)
         lbl_arch = tk.Label(fila1, text="Sin archivo cargado.", font=FONT_BODY,
                             bg=BG2, fg=TEXT2, anchor="w")
         lbl_arch.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -784,6 +822,7 @@ class CruzarRemesasModule:
                                     values=["— No usar —"], state="readonly",
                                     font=FONT_BODY, width=34)
         cf_col_combo.pack(side=tk.LEFT)
+        self._anti_wheel_combo(cf_col_combo)
 
         # ── Caja de texto para pegar las facturas ────────────────────────────
         tk.Label(body, text="Números de factura a buscar (separados por coma, espacio, "

@@ -133,13 +133,14 @@ class ExcelLoaderWindow:
         self._lbl_info.configure(
             text=f"Hoja: '{self.hojas[0]}'  ·  {len(self.df_raw)} filas  ·  "
                  f"columnas: {', '.join(self.df_raw.columns.astype(str))}")
-        # Actualizar combos de mapeo
+        # Actualizar combos de mapeo (limpiar selección previa). SIN auto-mapeo:
+        # el usuario elige todas las columnas manualmente, una sola vez.
         for clave, var in self.vars.items():
             combo = self.combos[clave]
             combo.configure(values=self.cols)
             var.set("— No usar —")
-        # Re-auto-mapear
-        self._on_hoja_change()
+        # Solo refrescar las listas de los combos de valores-condición (vacías aún)
+        self._actualizar_cond_valores(sugerir_default=False)
         # Limpiar resumen (puede no existir aún si se llama antes de _build completo)
         if hasattr(self, "lbl_resumen") and self.lbl_resumen is not None:
             self.lbl_resumen.configure(text="", fg=TEXT2)
@@ -149,8 +150,29 @@ class ExcelLoaderWindow:
         self.df_raw = self.xl_file.parse(nombre_hoja)
         self.cols   = ["— No usar —"] + list(self.df_raw.columns.astype(str))
 
+    @staticmethod
+    def _anti_wheel_combo(combo):
+        """Evita el bug de ttk.Combobox donde el scroll del mouse CAMBIA su valor.
+        Intercepta la rueda: no cambia el valor y, en su lugar, desplaza el Canvas
+        ancestro (si lo hay) para que la página siga haciendo scroll normal."""
+        def _on_wheel(e):
+            w = combo.master
+            while w is not None and not isinstance(w, tk.Canvas):
+                w = getattr(w, "master", None)
+            if isinstance(w, tk.Canvas):
+                try:
+                    w.yview_scroll(int(-1 * (e.delta / 120)), "units")
+                except Exception:
+                    pass
+            return "break"   # impide que el combobox cambie de valor
+        combo.bind("<MouseWheel>", _on_wheel)
+        combo.bind("<Button-4>", lambda e: (_on_wheel(e), "break")[1])
+        combo.bind("<Button-5>", lambda e: (_on_wheel(e), "break")[1])
+
     def _on_hoja_change(self, event=None):
-        """Callback al cambiar de hoja: recarga df, actualiza combos y auto-mapea."""
+        """Callback al cambiar de hoja: recarga df y refresca las LISTAS de los
+        combos, pero NO auto-selecciona nada (respeta lo que eligió el usuario).
+        Solo limpia una selección si su columna ya no existe en la hoja nueva."""
         nombre = self._hoja_var.get()
         if not nombre or self.xl_file is None:
             return
@@ -161,44 +183,14 @@ class ExcelLoaderWindow:
             text=f"Hoja: '{nombre}'  ·  {len(self.df_raw)} filas  ·  "
                  f"columnas: {', '.join(self.df_raw.columns.astype(str))}")
 
-        # Actualizar valores de cada combo y re-auto-mapear
+        cols_set = set(self.df_raw.columns.astype(str))
         for clave, var in self.vars.items():
-            combo = self.combos[clave]
-            combo.configure(values=self.cols)
-            # Intentar auto-match con las nuevas columnas
-            matched = False
-            for col in self.df_raw.columns.astype(str):
-                col_norm = col.lower().replace(" ", "_").replace("°", "").replace("n", "n")
-                hints = {
-                    "col_nf":       ["factura", "nfactura", "num_fac", "n_factura", "nfac"],
-                    "col_cufe":     ["cufe"],
-                    "col_fecha":    ["fecha"],
-                    "col_consec":   ["remesa", "consecutivo", "consec"],
-                    "col_radicado": ["radicado", "rad"],
-                    "col_val_rem":  ["valor_remesa", "valor_rem", "vrem", "val_rem"],
-                    "col_val_fac":  ["valor_factura", "valor fac", "val_fac", "vfac"],
-                    "col_peso":     ["peso", "kg", "kgm"],
-                    "col_desc_lin": ["descripcion", "desc", "descripcion_linea"],
-                    "col_nit_cli":  ["nit"],
-                    "col_nom_cli":  ["nombre_cliente", "nombre cli", "nom_cli", "cliente"],
-                    "col_novedad":  ["novedad"],
-                    "col_comp_gen": ["comp. generador", "generador carga", "comp_generador",
-                                     "generador_carga", "comp generador"],
-                    "col_rem_creada":   ["remesa creada", "rem creada", "creada"],
-                    "col_asoc_rem_man": ["asociaci", "rem-man", "rem man", "remesa_manifiesto"],
-                    "col_cumplido_rem": ["cumplido remesa", "cumplido rem", "cumplido"],
-                    "col_rem_facturada":["remesa facturada", "rem facturada", "facturada"],
-                    "col_estado":   ["estado"],
-                }
-                if any(h in col_norm for h in hints.get(clave, [])) \
-                   and not (clave == "col_nit_cli" and "unitar" in col_norm):
-                    var.set(col)
-                    matched = True
-                    break
-            if not matched:
+            self.combos[clave].configure(values=self.cols)
+            # Si la columna elegida ya no existe en la hoja nueva, limpiarla.
+            if var.get() != "— No usar —" and var.get() not in cols_set:
                 var.set("— No usar —")
-        # Actualizar valores de los combos de columnas-condición si estaban mapeadas
-        self._actualizar_cond_valores()
+        # Refrescar las LISTAS de los combos de valores-condición (sin sugerir defaults)
+        self._actualizar_cond_valores(sugerir_default=False)
 
         # Limpiar resumen
         if hasattr(self, "lbl_resumen") and self.lbl_resumen is not None:
@@ -252,6 +244,7 @@ class ExcelLoaderWindow:
                                         font=FONT_BODY, width=28)
         self._hoja_combo.pack(side=tk.LEFT)
         self._hoja_combo.bind("<<ComboboxSelected>>", self._on_hoja_change)
+        self._anti_wheel_combo(self._hoja_combo)
 
         # Info dinámica (se actualiza al cargar archivo y al cambiar hoja)
         self._lbl_info = tk.Label(hdr,
@@ -330,36 +323,9 @@ class ExcelLoaderWindow:
                                  font=FONT_BODY, width=30)
             combo.pack(side=tk.LEFT, padx=(0,12), pady=5)
             self.combos[clave] = combo
+            self._anti_wheel_combo(combo)
 
-            # Auto-match por nombre similar (solo si hay archivo cargado)
-            if self.df_raw is not None:
-                for col in self.df_raw.columns.astype(str):
-                    col_norm = col.lower().replace(" ", "_").replace("°", "").replace("n", "n")
-                    hints = {
-                        "col_nf":       ["factura", "nfactura", "num_fac", "n_factura", "nfac"],
-                        "col_cufe":     ["cufe"],
-                        "col_fecha":    ["fecha"],
-                        "col_consec":   ["remesa", "consecutivo", "consec"],
-                        "col_radicado": ["radicado", "rad"],
-                        "col_val_rem":  ["valor_remesa", "valor_rem", "vrem", "val_rem"],
-                        "col_val_fac":  ["valor_factura", "valor fac", "val_fac", "vfac"],
-                        "col_peso":     ["peso", "kg", "kgm"],
-                        "col_desc_lin": ["descripcion", "desc", "descripcion_linea"],
-                        "col_nit_cli":  ["nit"],
-                        "col_nom_cli":  ["nombre_cliente", "nombre cli", "nom_cli", "cliente"],
-                        "col_novedad":  ["novedad"],
-                        "col_comp_gen": ["comp. generador", "generador carga", "comp_generador",
-                                         "generador_carga", "comp generador"],
-                        "col_rem_creada":   ["remesa creada", "rem creada", "creada"],
-                        "col_asoc_rem_man": ["asociaci", "rem-man", "rem man", "remesa_manifiesto"],
-                        "col_cumplido_rem": ["cumplido remesa", "cumplido rem", "cumplido"],
-                        "col_rem_facturada":["remesa facturada", "rem facturada", "facturada"],
-                        "col_estado":   ["estado"],
-                    }
-                    if any(h in col_norm for h in hints.get(clave, [])) \
-                       and not (clave == "col_nit_cli" and "unitar" in col_norm):
-                        var.set(col)
-                        break
+            # NO hay auto-mapeo: el usuario elige cada columna manualmente y se queda.
 
             # Default label
             def_txt = default if default else "—  (obligatorio)"
@@ -368,9 +334,11 @@ class ExcelLoaderWindow:
                      anchor="w", wraplength=320, justify="left"
                      ).pack(side=tk.LEFT, padx=(0,8), fill=tk.X, expand=True)
 
-            # Al cambiar una columna-condición, actualizar sus valores disponibles
+            # Al cambiar una columna-condición, refrescar SOLO su propio combo de
+            # valores (sin tocar las demás ni sugerir defaults automáticamente).
             if clave in {ck for ck, _, _ in self.COND_COLS}:
-                var.trace_add("write", lambda *_: self._actualizar_cond_valores())
+                var.trace_add("write",
+                              lambda *a, k=clave: self._actualizar_cond_valores(solo_clave=k))
 
         # ── Resumen ───────────────────────────────────────────────────────────
         self.lbl_resumen = tk.Label(body, text="", font=FONT_BODY,
@@ -410,9 +378,11 @@ class ExcelLoaderWindow:
         tk.Label(filtro_frame, text="Filtro de generación:",
                  font=FONT_BODY, bg=BG2, fg=TEXT).pack(side=tk.LEFT, padx=(0, 10))
         self._filtro_gen_var = tk.StringVar(value=self.FILTROS_GEN[0])
-        ttk.Combobox(filtro_frame, textvariable=self._filtro_gen_var,
+        _filtro_combo = ttk.Combobox(filtro_frame, textvariable=self._filtro_gen_var,
                      values=self.FILTROS_GEN, state="readonly",
-                     font=FONT_BODY, width=38).pack(side=tk.LEFT)
+                     font=FONT_BODY, width=38)
+        _filtro_combo.pack(side=tk.LEFT)
+        self._anti_wheel_combo(_filtro_combo)
         tk.Label(filtro_frame,
                  text="  (requiere Excel del cruce con sus columnas de validación)",
                  font=FONT_SMALL, bg=BG2, fg=TEXT2).pack(side=tk.LEFT, padx=(6, 0))
@@ -439,6 +409,7 @@ class ExcelLoaderWindow:
             combo.grid(row=r, column=c + 1, sticky="w", padx=(0, 16), pady=2)
             self._cond_valor_vars[clave]   = var
             self._cond_valor_combos[clave] = combo
+            self._anti_wheel_combo(combo)
         tk.Label(cond_frame,
                  text="Comp. Generador aplica en ambos filtros de novedad; las demás solo en "
                       "'Reconstruir Sí / condiciones ideales'. Cada columna se filtra solo si "
@@ -707,14 +678,21 @@ class ExcelLoaderWindow:
             return v.get()
         return self._col_novedad(df)
 
-    def _actualizar_cond_valores(self):
-        """Para cada columna-condición mapeada, puebla su combo de valor con los
-        valores únicos de esa columna (+ 'Todas' y '— No usar —'), preseleccionando
-        el valor por defecto sugerido si existe en la columna."""
+    def _actualizar_cond_valores(self, solo_clave=None, sugerir_default=False):
+        """Puebla la LISTA de valores de los combos de columnas-condición desde su
+        columna mapeada. No cambia un valor ya elegido por el usuario.
+
+        - `solo_clave`: si se indica, solo actualiza ese combo (no toca los demás).
+        - `sugerir_default`: si True (solo al cargar archivo), preselecciona el valor
+          por defecto sugerido. Si False, deja '— No usar —' cuando no hay selección
+          válida — nunca elige un valor "aleatorio" por su cuenta.
+        """
         combos = getattr(self, "_cond_valor_combos", None)
         if not combos:
             return
         for clave, _etiqueta, default_val in self.COND_COLS:
+            if solo_clave is not None and clave != solo_clave:
+                continue
             combo = combos.get(clave)
             var   = self._cond_valor_vars.get(clave)
             if combo is None or var is None:
@@ -732,10 +710,12 @@ class ExcelLoaderWindow:
             combo.configure(values=opciones)
             cur = var.get()
             if cur not in opciones:
-                # Preseleccionar el valor sugerido si está disponible (case-insensitive)
-                match = next((u for u in vals_uniq
-                              if u.strip().upper() == default_val.strip().upper()), None)
-                var.set(match or (vals_uniq[0] if vals_uniq else "Todas"))
+                if sugerir_default:
+                    match = next((u for u in vals_uniq
+                                  if u.strip().upper() == default_val.strip().upper()), None)
+                    var.set(match or "— No usar —")
+                else:
+                    var.set("— No usar —")
 
     # Filtros que además exigen la columna 'Novedad remesa'
     FILTROS_NOVEDAD = {"Reconstruir = Sí y Novedad vacía", "Reconstruir Sí / condiciones ideales"}
