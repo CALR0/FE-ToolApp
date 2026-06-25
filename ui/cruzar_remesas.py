@@ -26,8 +26,9 @@ class CruzarRemesasModule:
 
     # Columnas que se intentan mapear en cada uno de los dos archivos
     CAMPOS_RG = [
-        ("rg_col_nf",      "N° Factura",            True),
-        ("rg_col_val_fac", "Valor total factura",   True),
+        ("rg_col_nf",      "N° Factura",                  True),
+        ("rg_col_val_fac", "Valor total factura",         True),
+        ("rg_col_val_un",  "Valor unitario remesa (RG)",  False),
     ]
     CAMPOS_OTRO = [
         ("otro_col_nf",          "N° Factura",                    True),
@@ -69,6 +70,7 @@ class CruzarRemesasModule:
     HINTS = {
         "rg_col_nf":       ["factura", "nfactura", "num_fac", "n_factura", "numero_factura"],
         "rg_col_val_fac":  ["valor_total_factura", "valor_factura", "val_fac", "total_factura"],
+        "rg_col_val_un":   ["valor_unitario", "vr_unitario", "valor_unit", "unitario", "val_un"],
         "otro_col_nf":     ["factura", "nfactura", "num_fac", "n_factura", "numero_factura"],
         "otro_col_consec": ["remesa", "consecutivo", "consec"],
         "otro_col_val_un":   ["valor_unitario", "vr_unitario", "valor_remesa", "val_rem", "vunit"],
@@ -232,8 +234,8 @@ class CruzarRemesasModule:
               foreground=[("selected", "#ffffff")])
 
         cols = ("N° Factura", "Remesas RG", "Remesas Otro Excel",
-                "¿Coinciden remesas?", "Valor Factura RG", "Suma valores Otro Excel",
-                "¿Coincide valor factura con RG?", "Reconstruir")
+                "¿Coinciden remesas?", "Valor Factura RG", "Suma unitarios (comparada)",
+                "Base", "¿Coincide valor factura con RG?", "Reconstruir")
         self._tree = ttk.Treeview(tbl_frame, columns=cols, show="headings",
                                   style="Cruce.Treeview", selectmode="browse")
         vsb = ttk.Scrollbar(tbl_frame, orient="vertical", command=self._tree.yview)
@@ -243,7 +245,7 @@ class CruzarRemesasModule:
         hsb.pack(side=tk.BOTTOM, fill=tk.X)
         self._tree.pack(fill=tk.BOTH, expand=True)
 
-        for c, w in zip(cols, (110, 90, 130, 130, 120, 150, 180, 100)):
+        for c, w in zip(cols, (110, 90, 130, 130, 120, 160, 90, 180, 100)):
             self._tree.heading(c, text=c)
             self._tree.column(c, width=w, anchor="center", stretch=False)
 
@@ -462,6 +464,8 @@ class CruzarRemesasModule:
         self._consecutivos_otro_por_factura = {}
         self._passthrough_por_factura = {clave: {} for clave, _ in self.PASSTHROUGH_OTRO}
         for nf in todas_facturas:
+            rg_val_un_col = c.get("rg_col_val_un", "— No usar —")
+            usa_rg_unitarios = bool(rg_val_un_col and rg_val_un_col != "— No usar —")
             if nf in grupos_rg.groups:
                 g_rg = grupos_rg.get_group(nf)
                 n_remesas_rg = len(g_rg)
@@ -469,9 +473,18 @@ class CruzarRemesasModule:
                     valor_factura_rg = self._to_num(g_rg[c["rg_col_val_fac"]].iloc[0])
                 except Exception:
                     valor_factura_rg = 0.0
+                # Suma de los valores unitarios del propio RG (consistencia interna)
+                suma_valor_rg = 0.0
+                if usa_rg_unitarios and rg_val_un_col in g_rg.columns:
+                    for v in g_rg[rg_val_un_col]:
+                        try:
+                            suma_valor_rg += self._to_num(v)
+                        except Exception:
+                            pass
             else:
                 n_remesas_rg = 0
                 valor_factura_rg = 0.0
+                suma_valor_rg = 0.0
 
             if nf in grupos_otro.groups:
                 g_otro = grupos_otro.get_group(nf)
@@ -503,7 +516,11 @@ class CruzarRemesasModule:
             self._consecutivos_otro_por_factura[nf] = consecutivos_otro
 
             coinciden_remesas = (n_remesas_rg == n_remesas_otro) and n_remesas_rg > 0
-            coincide_valor = abs(valor_factura_rg - suma_valor_otro) < 1.0 and valor_factura_rg > 0
+            # La comparación de valor usa los unitarios del PROPIO RG si se mapeó esa
+            # columna (consistencia interna del RG, que es lo que se ve en el reporte);
+            # si no se mapea, cae al comportamiento anterior (suma del otro Excel).
+            suma_comparada = suma_valor_rg if usa_rg_unitarios else suma_valor_otro
+            coincide_valor = abs(valor_factura_rg - suma_comparada) < 1.0 and valor_factura_rg > 0
             reconstruir = coinciden_remesas and coincide_valor
 
             self._filas_resultado.append({
@@ -513,6 +530,9 @@ class CruzarRemesasModule:
                 "coinciden_remesas":           "Sí" if coinciden_remesas else "No",
                 "valor_factura_rg":            valor_factura_rg,
                 "suma_valor_otro":             suma_valor_otro,
+                "suma_valor_rg":               suma_valor_rg,
+                "suma_comparada":              suma_comparada,
+                "base_comparacion":            "RG" if usa_rg_unitarios else "Otro Excel",
                 "coincide_valor_factura_rg":   "Sí" if coincide_valor else "No",
                 "reconstruir":                 "Sí" if reconstruir else "No",
             })
@@ -543,7 +563,8 @@ class CruzarRemesasModule:
                 f["numero_factura"], f["remesas_rg"], f["remesas_otro"],
                 f["coinciden_remesas"],
                 f"$ {f['valor_factura_rg']:,.0f}".replace(",", "."),
-                f"$ {f['suma_valor_otro']:,.0f}".replace(",", "."),
+                f"$ {f.get('suma_comparada', f['suma_valor_otro']):,.0f}".replace(",", "."),
+                f.get("base_comparacion", "Otro Excel"),
                 f["coincide_valor_factura_rg"],
                 f["reconstruir"],
             ), tags=(tag,))
