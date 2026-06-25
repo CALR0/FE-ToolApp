@@ -35,10 +35,25 @@ class ExcelLoaderWindow:
         "Todas (sin filtro)",
         "Solo Reconstruir = Sí",
         "Reconstruir = Sí y Novedad vacía",
+        "Reconstruir Sí / condiciones ideales",
         "Coinciden remesas, NO coincide valor",
         "Coincide valor, NO coinciden remesas",
         "NO coinciden remesas",
         "NO coincide valor",
+    ]
+
+    FILTRO_COND_IDEAL = "Reconstruir Sí / condiciones ideales"
+
+    # Columnas-condición opcionales (valor exacto requerido por columna, a nivel de
+    # factura). (clave_mapeo, etiqueta_UI, valor_default_sugerido).
+    # `col_comp_gen` aplica en ambos filtros de novedad; las demás solo en el filtro
+    # "condiciones ideales".
+    COND_COLS = [
+        ("col_comp_gen",      "Comp. Generador Carga RNDC",    "SI"),
+        ("col_rem_creada",    "Remesa creada RNDC",            "SI EXISTE"),
+        ("col_asoc_rem_man",  "Comp. Asociación Rem-Man RNDC", "SI"),
+        ("col_cumplido_rem",  "Cumplido remesa RNDC",          "SI"),
+        ("col_rem_facturada", "Remesa facturada",              "NO"),
     ]
 
     # Campos requeridos y opcionales para el mapeo
@@ -56,7 +71,11 @@ class ExcelLoaderWindow:
         ("col_nit_cli",   "NIT cliente (opcional)",    False, "Usa 'Datos del Cliente'. El dígito = último número del NIT"),
         ("col_nom_cli",   "Nombre cliente (opcional)", False, "Usa 'Datos del Cliente'"),
         ("col_novedad",   "Novedad remesa (opcional)",             False, "Solo se usa para el filtro 'Reconstruir=Sí y Novedad vacía'"),
-        ("col_comp_gen",  "Comp. Generador Carga RNDC (opcional)", False, "Solo se usa junto al filtro 'Reconstruir=Sí y Novedad vacía'"),
+        ("col_comp_gen",  "Comp. Generador Carga RNDC (opcional)", False, "Valor requerido por factura en los filtros de novedad"),
+        ("col_rem_creada","Remesa creada RNDC (opcional)",         False, "Solo filtro 'condiciones ideales' — valor requerido por factura"),
+        ("col_asoc_rem_man","Comp. Asociación Rem-Man RNDC (opcional)", False, "Solo filtro 'condiciones ideales' — valor requerido por factura"),
+        ("col_cumplido_rem","Cumplido remesa RNDC (opcional)",     False, "Solo filtro 'condiciones ideales' — valor requerido por factura"),
+        ("col_rem_facturada","Remesa facturada (opcional)",        False, "Solo filtro 'condiciones ideales' — valor requerido por factura"),
         ("col_estado",    "Estado (opcional)",                     False, "Si se mapea, omite las facturas ya generadas (con Estado lleno, ej. CARGADA/PENDIENTE)"),
     ]
 
@@ -165,6 +184,10 @@ class ExcelLoaderWindow:
                     "col_novedad":  ["novedad"],
                     "col_comp_gen": ["comp. generador", "generador carga", "comp_generador",
                                      "generador_carga", "comp generador"],
+                    "col_rem_creada":   ["remesa creada", "rem creada", "creada"],
+                    "col_asoc_rem_man": ["asociaci", "rem-man", "rem man", "remesa_manifiesto"],
+                    "col_cumplido_rem": ["cumplido remesa", "cumplido rem", "cumplido"],
+                    "col_rem_facturada":["remesa facturada", "rem facturada", "facturada"],
                     "col_estado":   ["estado"],
                 }
                 if any(h in col_norm for h in hints.get(clave, [])) \
@@ -174,8 +197,8 @@ class ExcelLoaderWindow:
                     break
             if not matched:
                 var.set("— No usar —")
-        # Actualizar valores del combo Comp. Generador si estaba mapeado
-        self._actualizar_comp_gen_valores()
+        # Actualizar valores de los combos de columnas-condición si estaban mapeadas
+        self._actualizar_cond_valores()
 
         # Limpiar resumen
         if hasattr(self, "lbl_resumen") and self.lbl_resumen is not None:
@@ -327,6 +350,10 @@ class ExcelLoaderWindow:
                         "col_novedad":  ["novedad"],
                         "col_comp_gen": ["comp. generador", "generador carga", "comp_generador",
                                          "generador_carga", "comp generador"],
+                        "col_rem_creada":   ["remesa creada", "rem creada", "creada"],
+                        "col_asoc_rem_man": ["asociaci", "rem-man", "rem man", "remesa_manifiesto"],
+                        "col_cumplido_rem": ["cumplido remesa", "cumplido rem", "cumplido"],
+                        "col_rem_facturada":["remesa facturada", "rem facturada", "facturada"],
                         "col_estado":   ["estado"],
                     }
                     if any(h in col_norm for h in hints.get(clave, [])) \
@@ -341,9 +368,9 @@ class ExcelLoaderWindow:
                      anchor="w", wraplength=320, justify="left"
                      ).pack(side=tk.LEFT, padx=(0,8), fill=tk.X, expand=True)
 
-            # Al cambiar la columna Comp. Generador, actualizar valores disponibles
-            if clave == "col_comp_gen":
-                var.trace_add("write", lambda *_: self._actualizar_comp_gen_valores())
+            # Al cambiar una columna-condición, actualizar sus valores disponibles
+            if clave in {ck for ck, _, _ in self.COND_COLS}:
+                var.trace_add("write", lambda *_: self._actualizar_cond_valores())
 
         # ── Resumen ───────────────────────────────────────────────────────────
         self.lbl_resumen = tk.Label(body, text="", font=FONT_BODY,
@@ -390,20 +417,35 @@ class ExcelLoaderWindow:
                  text="  (requiere Excel del cruce con sus columnas de validación)",
                  font=FONT_SMALL, bg=BG2, fg=TEXT2).pack(side=tk.LEFT, padx=(6, 0))
 
-        # ── Filtro adicional: valor de Comp. Generador Carga RNDC ────────────
-        compgen_frame = tk.Frame(body, bg=BG2, padx=12, pady=6)
-        compgen_frame.pack(fill=tk.X, pady=(0, 8))
-        tk.Label(compgen_frame, text="Comp. Generador RNDC (valor requerido):",
-                 font=FONT_BODY, bg=BG2, fg=TEXT).pack(side=tk.LEFT, padx=(0, 10))
-        self._comp_gen_valor_var = tk.StringVar(value="— No usar —")
-        self._comp_gen_valor_combo = ttk.Combobox(
-            compgen_frame, textvariable=self._comp_gen_valor_var,
-            values=["— No usar —", "Todas"], state="readonly",
-            font=FONT_BODY, width=22)
-        self._comp_gen_valor_combo.pack(side=tk.LEFT)
-        tk.Label(compgen_frame,
-                 text="  (activo solo con filtro 'Reconstruir=Sí y Novedad vacía' y columna mapeada)",
-                 font=FONT_SMALL, bg=BG2, fg=TEXT2).pack(side=tk.LEFT, padx=(6, 0))
+        # ── Filtros por valor de columnas-condición (Comp. Generador y, en el
+        #    filtro 'condiciones ideales', las columnas RNDC del cruce) ─────────
+        cond_frame = tk.Frame(body, bg=BG2, padx=12, pady=6)
+        cond_frame.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(cond_frame, text="Valores requeridos por columna (a nivel de factura):",
+                 font=FONT_H2, bg=BG2, fg=TEXT).grid(row=0, column=0, columnspan=4,
+                                                     sticky="w", pady=(0, 4))
+        self._cond_valor_vars   = {}
+        self._cond_valor_combos = {}
+        for i, (clave, etiqueta, _default) in enumerate(self.COND_COLS):
+            r = 1 + i // 2
+            c = (i % 2) * 2
+            tk.Label(cond_frame, text=f"{etiqueta}:", font=FONT_SMALL, bg=BG2,
+                     fg=TEXT2, anchor="w").grid(row=r, column=c, sticky="w",
+                                                padx=(0, 6), pady=2)
+            var = tk.StringVar(value="— No usar —")
+            combo = ttk.Combobox(cond_frame, textvariable=var,
+                                 values=["— No usar —", "Todas"], state="readonly",
+                                 font=FONT_BODY, width=18)
+            combo.grid(row=r, column=c + 1, sticky="w", padx=(0, 16), pady=2)
+            self._cond_valor_vars[clave]   = var
+            self._cond_valor_combos[clave] = combo
+        tk.Label(cond_frame,
+                 text="Comp. Generador aplica en ambos filtros de novedad; las demás solo en "
+                      "'Reconstruir Sí / condiciones ideales'. Cada columna se filtra solo si "
+                      "se mapea y se elige un valor distinto de 'Todas'/'— No usar —'.",
+                 font=FONT_SMALL, bg=BG2, fg=TEXT2, justify="left", wraplength=720
+                 ).grid(row=1 + (len(self.COND_COLS)+1)//2, column=0, columnspan=4,
+                        sticky="w", pady=(4, 0))
 
         btn_row = tk.Frame(body, bg=BG)
         btn_row.pack(fill=tk.X, pady=(4, 0))
@@ -665,29 +707,38 @@ class ExcelLoaderWindow:
             return v.get()
         return self._col_novedad(df)
 
-    def _actualizar_comp_gen_valores(self):
-        """Puebla el combo de valor de Comp. Generador con los valores únicos
-        de la columna mapeada (+ 'Todas' y '— No usar —')."""
-        combo = getattr(self, "_comp_gen_valor_combo", None)
-        if combo is None:
+    def _actualizar_cond_valores(self):
+        """Para cada columna-condición mapeada, puebla su combo de valor con los
+        valores únicos de esa columna (+ 'Todas' y '— No usar —'), preseleccionando
+        el valor por defecto sugerido si existe en la columna."""
+        combos = getattr(self, "_cond_valor_combos", None)
+        if not combos:
             return
-        cg_var = self.vars.get("col_comp_gen")
-        col = cg_var.get() if cg_var else None
-        if not col or col == "— No usar —" or self.df_raw is None or col not in self.df_raw.columns:
-            combo.configure(values=["— No usar —", "Todas"])
-            self._comp_gen_valor_var.set("— No usar —")
-            return
-        vals_uniq = sorted({str(v).strip() for v in self.df_raw[col].dropna() if str(v).strip()})
-        opciones = ["— No usar —", "Todas"] + vals_uniq
-        combo.configure(values=opciones)
-        # Si el valor actual no es válido, poner el primer valor real o "SI" si existe
-        cur = self._comp_gen_valor_var.get()
-        if cur not in opciones:
-            default = "SI" if "SI" in vals_uniq else (vals_uniq[0] if vals_uniq else "Todas")
-            self._comp_gen_valor_var.set(default)
+        for clave, _etiqueta, default_val in self.COND_COLS:
+            combo = combos.get(clave)
+            var   = self._cond_valor_vars.get(clave)
+            if combo is None or var is None:
+                continue
+            col_var = self.vars.get(clave)
+            col = col_var.get() if col_var else None
+            if not col or col == "— No usar —" or self.df_raw is None \
+               or col not in self.df_raw.columns:
+                combo.configure(values=["— No usar —", "Todas"])
+                var.set("— No usar —")
+                continue
+            vals_uniq = sorted({str(v).strip() for v in self.df_raw[col].dropna()
+                                if str(v).strip()})
+            opciones = ["— No usar —", "Todas"] + vals_uniq
+            combo.configure(values=opciones)
+            cur = var.get()
+            if cur not in opciones:
+                # Preseleccionar el valor sugerido si está disponible (case-insensitive)
+                match = next((u for u in vals_uniq
+                              if u.strip().upper() == default_val.strip().upper()), None)
+                var.set(match or (vals_uniq[0] if vals_uniq else "Todas"))
 
     # Filtros que además exigen la columna 'Novedad remesa'
-    FILTROS_NOVEDAD = {"Reconstruir = Sí y Novedad vacía"}
+    FILTROS_NOVEDAD = {"Reconstruir = Sí y Novedad vacía", "Reconstruir Sí / condiciones ideales"}
 
     @classmethod
     def _pasa_filtro(cls, filtro, rem, val, rec, novedad=""):
@@ -698,6 +749,7 @@ class ExcelLoaderWindow:
         if filtro == "Todas (sin filtro)":                      return True
         if filtro == "Solo Reconstruir = Sí":                   return x
         if filtro == "Reconstruir = Sí y Novedad vacía":        return x and cls._es_vacio(novedad)
+        if filtro == cls.FILTRO_COND_IDEAL:                     return x and cls._es_vacio(novedad)
         if filtro == "Coinciden remesas, NO coincide valor":    return r and not v
         if filtro == "Coincide valor, NO coinciden remesas":    return v and not r
         if filtro == "NO coinciden remesas":                    return not r
@@ -761,20 +813,28 @@ class ExcelLoaderWindow:
                         df = df[df[c_nf_col].astype(str).isin(nf_ok)]
                         df = df.drop(columns=["_fila_pasa"])
 
-                        # Filtro adicional: Comp. Generador Carga RNDC (a nivel de factura)
-                        cg_col_var = self.vars.get("col_comp_gen")
-                        cg_col = cg_col_var.get() if cg_col_var and cg_col_var.get() != "— No usar —" else None
-                        cg_val = getattr(self, "_comp_gen_valor_var", None)
-                        cg_val = cg_val.get() if cg_val else "— No usar —"
-                        if cg_col and cg_col in df.columns and cg_val not in ("— No usar —", "Todas"):
-                            df["_cg_pasa"] = [
-                                str(v).strip().upper() == cg_val.strip().upper()
-                                for v in df[cg_col]
-                            ]
-                            facturas_ok_cg = df.groupby(df[c_nf_col].astype(str))["_cg_pasa"].all()
-                            nf_ok_cg = set(facturas_ok_cg[facturas_ok_cg].index)
-                            df = df[df[c_nf_col].astype(str).isin(nf_ok_cg)]
-                            df = df.drop(columns=["_cg_pasa"])
+                        # Filtros adicionales por valor de columnas-condición (a nivel
+                        # de factura). En el filtro de novedad solo aplica Comp. Generador;
+                        # en 'condiciones ideales' aplican todas las columnas-condición.
+                        if filtro == self.FILTRO_COND_IDEAL:
+                            cond_aplicables = self.COND_COLS
+                        else:
+                            cond_aplicables = [t for t in self.COND_COLS if t[0] == "col_comp_gen"]
+                        cond_val_vars = getattr(self, "_cond_valor_vars", {})
+                        for clave, _etq, _def in cond_aplicables:
+                            col_var = self.vars.get(clave)
+                            cond_col = col_var.get() if col_var and col_var.get() != "— No usar —" else None
+                            val_var = cond_val_vars.get(clave)
+                            cond_val = val_var.get() if val_var else "— No usar —"
+                            if cond_col and cond_col in df.columns and cond_val not in ("— No usar —", "Todas"):
+                                df["_cond_pasa"] = [
+                                    str(v).strip().upper() == cond_val.strip().upper()
+                                    for v in df[cond_col]
+                                ]
+                                fac_ok_c = df.groupby(df[c_nf_col].astype(str))["_cond_pasa"].all()
+                                nf_ok_c = set(fac_ok_c[fac_ok_c].index)
+                                df = df[df[c_nf_col].astype(str).isin(nf_ok_c)]
+                                df = df.drop(columns=["_cond_pasa"])
                     else:
                         # Sin columna de N° factura: caer a filtro fila por fila
                         mask = [

@@ -11,7 +11,6 @@ from config.theme import (
     BG, BG2, BG3, ACCENT, ACCENT2, SUCCESS, WARNING, DANGER,
     TEXT, TEXT2, BORDER, FONT_H1, FONT_H2, FONT_BODY, FONT_SMALL,
 )
-from core.xml_generator import _parse_valor
 
 
 class CruzarRemesasModule:
@@ -31,11 +30,27 @@ class CruzarRemesasModule:
         ("rg_col_val_fac", "Valor total factura",   True),
     ]
     CAMPOS_OTRO = [
-        ("otro_col_nf",       "N° Factura",                   True),
-        ("otro_col_consec",   "Consecutivo / Remesa",         True),
-        ("otro_col_val_un",   "Valor unitario remesa",        True),
-        ("otro_col_comp_gen", "Comp. Generador Carga RNDC",   False),
-        ("otro_col_novedad",  "Novedad remesa",               False),
+        ("otro_col_nf",          "N° Factura",                    True),
+        ("otro_col_consec",      "Consecutivo / Remesa",          True),
+        ("otro_col_val_un",      "Valor unitario remesa",         True),
+        ("otro_col_comp_gen",    "Comp. Generador Carga RNDC",    False),
+        ("otro_col_novedad",     "Novedad remesa",                False),
+        ("otro_col_rem_creada",  "Remesa creada RNDC",            False),
+        ("otro_col_asoc_rem_man","Comp. Asociación Rem-Man RNDC", False),
+        ("otro_col_cumplido_rem","Cumplido remesa RNDC",          False),
+        ("otro_col_rem_facturada","Remesa facturada",             False),
+    ]
+
+    # Columnas OPCIONALES del otro Excel que se copian tal cual al reporte
+    # (passthrough, en orden posicional por factura, SIN filtro).
+    # (clave_mapeo, encabezado de la columna en el Excel exportado)
+    PASSTHROUGH_OTRO = [
+        ("otro_col_comp_gen",     "Comp. Generador Carga RNDC"),
+        ("otro_col_novedad",      "Novedad remesa"),
+        ("otro_col_rem_creada",   "Remesa creada RNDC"),
+        ("otro_col_asoc_rem_man", "Comp. Asociación Rem-Man RNDC"),
+        ("otro_col_cumplido_rem", "Cumplido remesa RNDC"),
+        ("otro_col_rem_facturada","Remesa facturada"),
     ]
 
     # Opciones de filtro para la exportación. El valor es una función que recibe
@@ -57,8 +72,12 @@ class CruzarRemesasModule:
         "otro_col_nf":     ["factura", "nfactura", "num_fac", "n_factura", "numero_factura"],
         "otro_col_consec": ["remesa", "consecutivo", "consec"],
         "otro_col_val_un":   ["valor_unitario", "vr_unitario", "valor_remesa", "val_rem", "vunit"],
-        "otro_col_comp_gen": ["comp. generador", "comp_generador", "generador carga", "generadorcarga", "rndc"],
+        "otro_col_comp_gen": ["comp._generador", "comp_generador", "generador_carga", "generadorcarga", "generador"],
         "otro_col_novedad":  ["novedad"],
+        "otro_col_rem_creada":   ["creada"],
+        "otro_col_asoc_rem_man": ["asociaci", "rem-man", "rem_man", "remesa_manifiesto"],
+        "otro_col_cumplido_rem": ["cumplido"],
+        "otro_col_rem_facturada":["facturada"],
     }
 
     def __init__(self):
@@ -78,8 +97,8 @@ class CruzarRemesasModule:
         self._mapa_resultado = {}
         self._col_rg_nf = None
         self._consecutivos_otro_por_factura = {}
-        self._comp_gen_otro_por_factura = {}
-        self._novedad_otro_por_factura = {}
+        # Passthrough: clave_mapeo → {nf: [valores en orden posicional]}
+        self._passthrough_por_factura = {clave: {} for clave, _ in self.PASSTHROUGH_OTRO}
         # Estado del modal "Consultar facturas (Excel)" — independiente del cruce
         self._cf_xl = None
         self._cf_df = None
@@ -367,12 +386,45 @@ class CruzarRemesasModule:
         """
         Convierte un valor de celda a float de forma robusta. Acepta números
         puros, celdas con formato moneda de Excel (que pandas ya lee como número)
-        y texto con símbolos de moneda o separadores ($, espacios, puntos, comas).
+        y texto con símbolos de moneda o separadores ($, espacios, puntos, comas),
+        en formato colombiano (1.585.960 / 611.111,00) o anglosajón
+        (1,585,960 / 611,111.00).
+
+        Distingue separador de miles vs decimal sin depender de `_parse_valor`
+        (que asume coma=decimal y rompe con miles tipo "1,585,960").
         """
+        if v is None:
+            return 0.0
         s = str(v).strip()
-        # Quitar todo lo que no sea dígito, punto, coma o signo negativo
+        # Dejar solo dígitos, separadores y signo negativo
         s = re.sub(r"[^\d.,\-]", "", s)
-        return _parse_valor(s)
+        if not s or s in ("-", ".", ","):
+            return 0.0
+
+        has_dot   = "." in s
+        has_comma = "," in s
+        if has_dot and has_comma:
+            # El último separador que aparece es el decimal; el otro es de miles.
+            if s.rfind(",") > s.rfind("."):
+                s = s.replace(".", "").replace(",", ".")
+            else:
+                s = s.replace(",", "")
+        elif has_comma:
+            # Solo comas: decimal si hay UNA coma con 1-2 decimales; si no, miles.
+            frac = s.split(",")[-1]
+            if s.count(",") == 1 and len(frac) in (1, 2):
+                s = s.replace(",", ".")
+            else:
+                s = s.replace(",", "")
+        elif has_dot:
+            # Solo puntos: decimal si hay UN punto con 1-2 decimales; si no, miles.
+            frac = s.split(".")[-1]
+            if not (s.count(".") == 1 and len(frac) in (1, 2)):
+                s = s.replace(".", "")
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
 
     # ── Validación y cruce ───────────────────────────────────────────────────
 
@@ -408,8 +460,7 @@ class CruzarRemesasModule:
 
         self._filas_resultado = []
         self._consecutivos_otro_por_factura = {}
-        self._comp_gen_otro_por_factura = {}
-        self._novedad_otro_por_factura = {}
+        self._passthrough_por_factura = {clave: {} for clave, _ in self.PASSTHROUGH_OTRO}
         for nf in todas_facturas:
             if nf in grupos_rg.groups:
                 g_rg = grupos_rg.get_group(nf)
@@ -434,26 +485,22 @@ class CruzarRemesasModule:
                 # Consecutivos en el orden en que aparecen en el otro Excel,
                 # para asignarlos en ese mismo orden a las líneas del RG.
                 consecutivos_otro = [self._fmt_consec(v) for v in g_otro[c["otro_col_consec"]]]
-                col_comp_gen = c.get("otro_col_comp_gen", "— No usar —")
-                if col_comp_gen and col_comp_gen != "— No usar —" and col_comp_gen in g_otro.columns:
-                    comp_gen_otro = [str(v) if not pd.isna(v) else "" for v in g_otro[col_comp_gen]]
-                else:
-                    comp_gen_otro = []
-                col_novedad = c.get("otro_col_novedad", "— No usar —")
-                if col_novedad and col_novedad != "— No usar —" and col_novedad in g_otro.columns:
-                    novedad_otro = [str(v) if not pd.isna(v) else "" for v in g_otro[col_novedad]]
-                else:
-                    novedad_otro = []
+                # Columnas passthrough: recoger sus valores por factura (orden posicional)
+                for clave, _ in self.PASSTHROUGH_OTRO:
+                    col = c.get(clave, "— No usar —")
+                    if col and col != "— No usar —" and col in g_otro.columns:
+                        vals = [str(v) if not pd.isna(v) else "" for v in g_otro[col]]
+                    else:
+                        vals = []
+                    self._passthrough_por_factura[clave][nf] = vals
             else:
                 n_remesas_otro = 0
                 suma_valor_otro = 0.0
                 consecutivos_otro = []
-                comp_gen_otro = []
-                novedad_otro = []
+                for clave, _ in self.PASSTHROUGH_OTRO:
+                    self._passthrough_por_factura[clave][nf] = []
 
             self._consecutivos_otro_por_factura[nf] = consecutivos_otro
-            self._comp_gen_otro_por_factura[nf] = comp_gen_otro
-            self._novedad_otro_por_factura[nf] = novedad_otro
 
             coinciden_remesas = (n_remesas_rg == n_remesas_otro) and n_remesas_rg > 0
             coincide_valor = abs(valor_factura_rg - suma_valor_otro) < 1.0 and valor_factura_rg > 0
@@ -548,35 +595,67 @@ class CruzarRemesasModule:
                 lst = self._consecutivos_otro_por_factura.get(nf, [])
                 return lst[pos] if pos < len(lst) else ""
 
-            def _comp_gen_en_pos(nf, pos):
-                lst = self._comp_gen_otro_por_factura.get(nf, [])
-                return lst[pos] if pos < len(lst) else ""
-
-            def _novedad_en_pos(nf, pos):
-                lst = self._novedad_otro_por_factura.get(nf, [])
+            def _pass_en_pos(clave, nf, pos):
+                lst = self._passthrough_por_factura.get(clave, {}).get(nf, [])
                 return lst[pos] if pos < len(lst) else ""
 
             df["Consecutivo Remesa (Otro Excel)"] = [
                 _consecutivo_en_pos(nf, pos) for nf, pos in zip(nf_serie, pos_serie)
             ]
-            # Solo añadir la columna si el usuario la mapeó.
-            # Es informativa: se copian los valores originales del otro Excel tal cual.
-            col_comp_gen = self.vars.get("otro_col_comp_gen")
-            if col_comp_gen and col_comp_gen.get() and col_comp_gen.get() != "— No usar —":
-                df["Comp. Generador Carga RNDC"] = [
-                    _comp_gen_en_pos(nf, pos) for nf, pos in zip(nf_serie, pos_serie)
-                ]
-            col_novedad = self.vars.get("otro_col_novedad")
-            if col_novedad and col_novedad.get() and col_novedad.get() != "— No usar —":
-                df["Novedad remesa"] = [
-                    _novedad_en_pos(nf, pos) for nf, pos in zip(nf_serie, pos_serie)
-                ]
+            # Columnas passthrough: solo se añaden si el usuario las mapeó. Son
+            # informativas: se copian los valores originales del otro Excel tal cual,
+            # en orden posicional (línea N del RG ↔ remesa N del otro Excel).
+            passthrough_activas = []   # [(clave, encabezado)] efectivamente mapeadas
+            for clave, encabezado in self.PASSTHROUGH_OTRO:
+                var = self.vars.get(clave)
+                if var and var.get() and var.get() != "— No usar —":
+                    df[encabezado] = [
+                        _pass_en_pos(clave, nf, pos) for nf, pos in zip(nf_serie, pos_serie)
+                    ]
+                    passthrough_activas.append((clave, encabezado))
             df["¿Coinciden remesas?"] = nf_serie.map(
                 lambda nf: self._mapa_resultado.get(nf, {}).get("coinciden_remesas", "No"))
             df["¿Coincide valor factura con RG?"] = nf_serie.map(
                 lambda nf: self._mapa_resultado.get(nf, {}).get("coincide_valor_factura_rg", "No"))
             df["Reconstruir"] = nf_serie.map(
                 lambda nf: self._mapa_resultado.get(nf, {}).get("reconstruir", "No"))
+
+            # ── Filas extra: remesas del Otro Excel que SOBRAN respecto al RG ──
+            # Si una factura tiene MÁS remesas en el Otro Excel que líneas en el RG,
+            # esas remesas sobrantes no caben en ninguna línea del RG y antes se
+            # perdían. Aquí se añaden como filas nuevas (columnas del RG vacías),
+            # ubicadas justo después de las líneas RG de su factura, para que queden
+            # visibles en el reporte y no desaparezcan.
+            # Orden de aparición de cada factura en el RG (para reubicar las extras).
+            fac_orden = {nf: i for i, nf in enumerate(dict.fromkeys(nf_serie))}
+            n_rg_por_fac = nf_serie.value_counts().to_dict()
+
+            df["_fo"]  = nf_serie.map(lambda nf: fac_orden.get(nf, len(fac_orden))).values
+            df["_pos"] = pos_serie.values
+
+            extra_records = []
+            for nf, lst in self._consecutivos_otro_por_factura.items():
+                n_otro = len(lst)
+                n_rg   = int(n_rg_por_fac.get(nf, 0))
+                for pos in range(n_rg, n_otro):
+                    rec = {col: "" for col in df.columns}
+                    rec[self._col_rg_nf] = nf
+                    rec["Consecutivo Remesa (Otro Excel)"] = _consecutivo_en_pos(nf, pos)
+                    for clave, encabezado in passthrough_activas:
+                        rec[encabezado] = _pass_en_pos(clave, nf, pos)
+                    info = self._mapa_resultado.get(nf, {})
+                    rec["¿Coinciden remesas?"]            = info.get("coinciden_remesas", "No")
+                    rec["¿Coincide valor factura con RG?"] = info.get("coincide_valor_factura_rg", "No")
+                    rec["Reconstruir"]                    = info.get("reconstruir", "No")
+                    rec["_fo"]  = fac_orden.get(nf, len(fac_orden))
+                    rec["_pos"] = pos
+                    extra_records.append(rec)
+
+            if extra_records:
+                df = pd.concat([df, pd.DataFrame(extra_records)], ignore_index=True)
+            # Reordenar para que cada factura quede junta y las extras tras sus líneas RG.
+            df = df.sort_values(["_fo", "_pos"], kind="stable").drop(columns=["_fo", "_pos"])
+            df = df.reset_index(drop=True)
 
             # Aplicar el filtro de exportación seleccionado (fila a fila, según
             # las banderas de la factura a la que pertenece cada línea del RG).
