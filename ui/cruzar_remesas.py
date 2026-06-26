@@ -525,21 +525,28 @@ class CruzarRemesasModule:
 
             if nf in grupos_otro.groups:
                 g_otro = grupos_otro.get_group(nf)
-                n_remesas_otro = len(g_otro)
+                # Saltar las filas cuyo CONSECUTIVO venga vacío: no cuentan como
+                # remesa ni aparecen en el reporte (evita espacios en blanco
+                # intercalados y corrige el conteo cuando vienen salteados).
+                consec_fmt = g_otro[c["otro_col_consec"]].map(self._fmt_consec)
+                mask_valid = consec_fmt.astype(str).str.strip() != ""
+                g_val = g_otro[mask_valid]
+                n_remesas_otro = len(g_val)
                 suma_valor_otro = 0.0
-                for v in g_otro[c["otro_col_val_un"]]:
-                    try:
-                        suma_valor_otro += self._to_num(v)
-                    except Exception:
-                        pass
-                # Consecutivos en el orden en que aparecen en el otro Excel,
-                # para asignarlos en ese mismo orden a las líneas del RG.
-                consecutivos_otro = [self._fmt_consec(v) for v in g_otro[c["otro_col_consec"]]]
-                # Columnas passthrough: recoger sus valores por factura (orden posicional)
+                if c["otro_col_val_un"] in g_val.columns:
+                    for v in g_val[c["otro_col_val_un"]]:
+                        try:
+                            suma_valor_otro += self._to_num(v)
+                        except Exception:
+                            pass
+                # Consecutivos (ya SIN vacíos) en orden de aparición, para asignarlos
+                # en ese mismo orden a las líneas del RG.
+                consecutivos_otro = consec_fmt[mask_valid].tolist()
+                # Columnas passthrough alineadas a las MISMAS filas válidas
                 for clave, _ in self.PASSTHROUGH_OTRO:
                     col = c.get(clave, "— No usar —")
-                    if col and col != "— No usar —" and col in g_otro.columns:
-                        vals = [str(v) if not pd.isna(v) else "" for v in g_otro[col]]
+                    if col and col != "— No usar —" and col in g_val.columns:
+                        vals = [str(v) if not pd.isna(v) else "" for v in g_val[col]]
                     else:
                         vals = []
                     self._passthrough_por_factura[clave][nf] = vals
