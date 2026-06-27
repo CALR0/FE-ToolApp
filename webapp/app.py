@@ -449,11 +449,14 @@ def modulo_consultar_remesas(perfil):
     st.header("🔍 Consultar remesas")
     st.caption("Consulta una o varias remesas en el RNDC (separadas por coma, espacio o salto de línea).")
 
-    txt = st.text_area("Consecutivo(s) de remesa", height=120, key="cq_txt",
-                       placeholder="11519464, 11519465\n11519466")
+    def _cq_limpiar():
+        # Callback (corre antes de instanciar los widgets) → limpieza confiable
+        st.session_state["cq_txt"] = ""
+        st.session_state.pop("cq_filas", None)
+
+    txt = st.text_area("Consecutivo(s) de remesa", height=120, key="cq_txt")
     cbtn1, cbtn2 = st.columns([1, 1])
-    if cbtn2.button("🗑 Limpiar módulo", key="cq_clear"):
-        _limpiar_modulo(["cq_"])
+    cbtn2.button("🗑 Limpiar módulo", key="cq_clear", on_click=_cq_limpiar)
     if cbtn1.button("🔍 Consultar", type="primary", key="cq_btn"):
         import re
         consecutivos = [t for t in re.split(r"[\s,;]+", txt.strip()) if t]
