@@ -931,7 +931,16 @@ class ExcelLoaderWindow:
             nom_cli = self.xl_ent_nom_cli.get().strip() or "DRUMMOND LTD"
 
             if c_nit_cli:
-                solo_digitos = re.sub(r"\D", "", str(primera[c_nit_cli]))
+                _vnit = primera[c_nit_cli]
+                # Limpiar el .0 que pandas añade al leer enteros como float, ANTES de
+                # extraer dígitos (si no, '8000213085.0' → nit erróneo y dígito '0').
+                if isinstance(_vnit, float) and _vnit.is_integer():
+                    _snit = str(int(_vnit))
+                else:
+                    _snit = str(_vnit).strip()
+                    if _snit.endswith(".0") and _snit[:-2].isdigit():
+                        _snit = _snit[:-2]
+                solo_digitos = re.sub(r"\D", "", _snit)
                 if len(solo_digitos) >= 2:
                     nit_cli, dig_cli = solo_digitos[:-1], solo_digitos[-1]
             if c_nom_cli:
