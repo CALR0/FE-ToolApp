@@ -337,6 +337,128 @@ def consultar_remesa_completa(consecutivo_remesa, perfil, procesoid=3, timeout=2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CONSULTA COMPLETA DE MANIFIESTO — proceso 4, tipo 3, variables=* (todos los campos)
+# (El proceso 6 es CUMPLIR manifiesto; aquí se CONSULTA el manifiesto = proceso 4.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RNDC_CONSULTA_MANIFIESTO_TMPL = """<?xml version='1.0' encoding='ISO-8859-1' ?>
+<root>
+  <acceso>
+    <username>{usuario}</username>
+    <password>{password}</password>
+  </acceso>
+  <solicitud>
+    <tipo>3</tipo>
+    <procesoid>{procesoid}</procesoid>
+  </solicitud>
+  <variables>*</variables>
+  <documento>
+    <NUMNITEMPRESATRANSPORTE>'{nit_empresa}'</NUMNITEMPRESATRANSPORTE>
+    <NUMMANIFIESTOCARGA>'{num_manifiesto}'</NUMMANIFIESTOCARGA>
+  </documento>
+</root>"""
+
+
+def consultar_manifiesto_completo(num_manifiesto, perfil, procesoid=4, timeout=20):
+    """
+    Consulta TODOS los campos de un manifiesto con `tipo=3` y `variables=*`
+    (proceso 4 = consultar manifiesto). Devuelve dinámicamente todas las variables
+    que arroje el RNDC, útil tanto para mostrar como para reutilizar en otros módulos.
+
+    NOTA: el proceso 6 es CUMPLIR manifiesto (datos del cumplido), reservado para
+    el futuro módulo de cumplir manifiesto. La CONSULTA del manifiesto es proceso 4.
+
+    Parámetros:
+        num_manifiesto : str  — número del manifiesto de carga.
+        perfil         : dict — usa rndc_usuario / rndc_password / nit_socio.
+        procesoid      : int  — 4 (consultar manifiesto); 6 sería el cumplido.
+        timeout        : int  — segundos de espera.
+
+    Retorna:
+        (ok: bool, resultado)
+        Si ok=True  → dict {tag: valor} con todos los campos del <documento>.
+        Si ok=False → str con el mensaje de error.
+    """
+    if not REQUESTS_OK:
+        return False, "La librería 'requests' no está instalada."
+
+    import html as _html, xml.etree.ElementTree as ET, re as _re
+
+    usuario     = perfil.get("rndc_usuario", "")
+    password    = perfil.get("rndc_password", "")
+    nit_empresa = perfil.get("nit_socio", "")
+
+    rndc_xml = _RNDC_CONSULTA_MANIFIESTO_TMPL.format(
+        procesoid=procesoid,
+        usuario=_html.escape(usuario),
+        password=_html.escape(password),
+        nit_empresa=_html.escape(nit_empresa),
+        num_manifiesto=_html.escape(str(num_manifiesto)),
+    )
+    soap_body = _RNDC_CONSULTA_SOAP_ENVELOPE.format(
+        rndc_xml_escaped=_html.escape(rndc_xml)
+    )
+
+    url     = _RNDC_CONSULTA_ENDPOINT + _RNDC_CONSULTA_SOAP_PATH
+    headers = {
+        "Content-Type": "text/xml; charset=UTF-8",
+        "SOAPAction":   _RNDC_CONSULTA_ACTION,
+    }
+
+    try:
+        resp = _requests.post(url, data=soap_body.encode("utf-8"),
+                              headers=headers, timeout=timeout)
+    except _requests.exceptions.ConnectionError:
+        return False, f"Sin conexión a {_RNDC_CONSULTA_ENDPOINT}"
+    except _requests.exceptions.Timeout:
+        return False, f"Tiempo de espera agotado ({timeout}s)"
+    except Exception as e:
+        return False, str(e)[:180]
+
+    inner_raw = None
+    m = _re.search(r'<[^>]*:?return[^>]*>(.*?)</[^>]*:?return>',
+                   resp.text, _re.DOTALL | _re.IGNORECASE)
+    if m:
+        inner_raw = m.group(1).strip()
+    if not inner_raw:
+        m2 = _re.search(r'(<root[^>]*>.*?</root>)', resp.text,
+                        _re.DOTALL | _re.IGNORECASE)
+        if m2:
+            inner_raw = m2.group(1).strip()
+    if not inner_raw:
+        return False, f"Respuesta no reconocida: {resp.text.strip()[:200]}"
+
+    inner = _html.unescape(inner_raw)
+
+    def _parse(texto):
+        for intento in (texto, texto.encode("iso-8859-1"),
+                        _re.sub(r'<\?xml[^?]*\?>', '', texto, count=1).strip()):
+            try:
+                return ET.fromstring(intento)
+            except Exception:
+                continue
+        return None
+
+    root_el = _parse(inner)
+    if root_el is None:
+        return False, f"No se pudo parsear la respuesta: {inner[:200]}"
+
+    for tag in (".//ErrorMSG", ".//error"):
+        el = root_el.find(tag)
+        if el is not None and el.text and el.text.strip():
+            return False, el.text.strip()
+
+    doc_el = root_el.find(".//documento")
+    if doc_el is None:
+        return False, f"Sin <documento> en la respuesta: {inner.strip()[:200]}"
+
+    campos = {child.tag: (child.text or "").strip() for child in doc_el}
+    if not campos:
+        return False, "El <documento> no trajo campos."
+    return True, campos
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CORREGIR REMESA — RNDC proceso 38 (tipo 1 = enviar/registrar)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -515,6 +637,17 @@ def anular_cumplido_manifiesto(num_manifiesto, cod_motivo, perfil, observaciones
     if str(observaciones).strip():
         variables["OBSERVACIONES"] = str(observaciones).strip()
     return _enviar_proceso_rndc(29, variables, perfil, timeout)
+
+
+def cumplir_manifiesto(variables, perfil, timeout=20):
+    """
+    Cumple un manifiesto en el RNDC (proceso 6, tipo 1).
+    `variables` es un dict {nombre: valor} con los campos del cumplido del manifiesto
+    (NUMMANIFIESTOCARGA, TIPOCUMPLIDOMANIFIESTO, FECHAENTREGADOCUMENTOS, etc.).
+    Mismo endpoint (rndcws) y credenciales que corregir/anular/cumplir remesa.
+    Retorna (ok, {ingresoid}) o (False, mensaje_error).
+    """
+    return _enviar_proceso_rndc(6, variables, perfil, timeout)
 
 
 def cumplir_remesa(variables, perfil, timeout=20):
