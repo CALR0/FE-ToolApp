@@ -1,3 +1,4 @@
+# rndc_service v2
 try:
     import requests as _requests
     REQUESTS_OK = True
