@@ -779,7 +779,7 @@ def modulo_cumplir_manifiesto(perfil):
 
     def _cmf_limpiar():
         st.session_state["cmf_in"] = ""
-        for k in ("cmf_full", "cmf_info", "cmf_man", "cmf_estado"):
+        for k in ("cmf_full", "cmf_info", "cmf_man", "cmf_estado", "cmf_ya_cumplido"):
             st.session_state.pop(k, None)
 
     st.text_input("N° Manifiesto de carga", key="cmf_in")
@@ -831,10 +831,17 @@ def modulo_cumplir_manifiesto(perfil):
                     if str(k).upper() == "ESTADO":
                         estado = str(v).strip().upper()
                         break
+                # Detectar si ya está cumplido: tipocumplidomanifiesto viene con valor (C/S)
+                tipo_cum = ""
+                for k, v in combinado.items():
+                    if str(k).lower() == "tipocumplidomanifiesto":
+                        tipo_cum = str(v).strip()
+                        break
                 st.session_state["cmf_man"] = man
-                st.session_state["cmf_full"] = combinado      # todos los campos (4 + 6)
+                st.session_state["cmf_full"] = combinado
                 st.session_state["cmf_info"] = _manif_curado(man, combinado)
                 st.session_state["cmf_estado"] = estado
+                st.session_state["cmf_ya_cumplido"] = bool(tipo_cum)
 
     info = st.session_state.get("cmf_info")
     if not info:
@@ -842,14 +849,12 @@ def modulo_cumplir_manifiesto(perfil):
     man = st.session_state.get("cmf_man", "")
     full = st.session_state.get("cmf_full", {})
     estado = st.session_state.get("cmf_estado", "")
-    ya_cumplido = (estado == "CE")
+    ya_cumplido = st.session_state.get("cmf_ya_cumplido", False)
 
     if ya_cumplido:
-        st.warning(f"⚠ El manifiesto {man} ya está **CUMPLIDO** (estado CE).")
-    elif estado == "AC":
-        st.info(f"El manifiesto {man} está **pendiente por cumplir** (estado AC). Puedes cumplirlo.")
+        st.warning(f"⚠ El manifiesto {man} ya está **CUMPLIDO**.")
     else:
-        st.info(f"Manifiesto {man} · estado: {estado or '—'}.")
+        st.info(f"El manifiesto {man} está **pendiente por cumplir**. Puedes cumplirlo.")
 
     st.subheader("📋 Información general del manifiesto")
     st.dataframe(pd.DataFrame([{"Campo": k, "Valor": v} for k, v in info.items()]),
@@ -885,7 +890,7 @@ def modulo_cumplir_manifiesto(perfil):
             ok, r = cumplir_manifiesto(variables, p)
         if ok:
             st.success(f"✓ Manifiesto {man} cumplido. Radicado: {r.get('ingresoid','?')}")
-            st.session_state["cmf_estado"] = "CE"
+            st.session_state["cmf_ya_cumplido"] = True
         else:
             st.error(f"✗ {r}")
 
