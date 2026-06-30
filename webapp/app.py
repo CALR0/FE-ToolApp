@@ -697,10 +697,11 @@ def modulo_consultar_manifiesto(perfil):
             st.warning("Escribe al menos un N° de manifiesto.")
         else:
             prog = st.progress(0.0, text="Consultando…")
+            p = _perfil_corregir(perfil)   # mismas credenciales que corregir remesa
             curados, full = [], {}
             for i, man in enumerate(lista, 1):
                 try:
-                    ok, res = consultar_manifiesto_completo(man, perfil)   # trae TODO (variables=*)
+                    ok, res = consultar_manifiesto_completo(man, p)   # trae TODO (variables=*)
                 except Exception as e:
                     ok, res = False, str(e)
                 if ok:
