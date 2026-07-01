@@ -18,6 +18,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import streamlit as st
+import streamlit.components.v1 as _components
 
 # En despliegue (sin config/perfiles.py en el repo) se genera desde st.secrets.
 # DEBE ir antes de importar config/core/services.
@@ -87,6 +88,20 @@ def _style_estado(val):
     if "pendiente" in s:
         return "background-color:#fef9c3; color:#854d0e; font-weight:600"   # amarillo
     return ""
+
+
+def _copiar_tabla(df, key):
+    """Botón pequeño que copia el DataFrame como TSV al portapapeles via JS."""
+    tsv = df.to_csv(sep="\t", index=False)
+    tsv_js = tsv.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+    _components.html(
+        f"""<button onclick="navigator.clipboard.writeText(`{tsv_js}`)
+                .then(()=>this.innerText='✓ Copiado')
+                .catch(()=>this.innerText='✗ Error')"
+            style="font-size:12px;padding:2px 10px;cursor:pointer;border:1px solid #ccc;
+                   border-radius:4px;background:#f0f2f6;">📋 Copiar tabla</button>""",
+        height=32,
+    )
 
 
 def _perfil_corregir(perfil):
@@ -410,11 +425,13 @@ def modulo_cargar_rndc(perfil):
     datos = [lib_rndc86.parse_factura_xml(nombre, b) for nombre, b in files_data]
 
     st.subheader("Facturas detectadas")
-    st.dataframe(pd.DataFrame([{
+    _df_fact = pd.DataFrame([{
         "Archivo": d["archivo"], "N° Factura": d["nf"], "Cliente": d["cliente"],
         "CUFE": d["cufe"], "Remesas": len(d["remesas"]),
         "Estado": ("⚠ " + d["error"]) if d["error"] else "⏳ Pendiente de envío"}
-        for d in datos]), use_container_width=True, hide_index=True)
+        for d in datos])
+    st.dataframe(_df_fact, use_container_width=True, hide_index=True)
+    _copiar_tabla(_df_fact, "cp_rndc_fact")
 
     filas_rem = []
     for d in datos:
@@ -422,8 +439,10 @@ def modulo_cargar_rndc(perfil):
             filas_rem.append({"N° Factura": d["nf"], "Consecutivo": r["consecutivo"],
                               "Radicado": r["radicado"], "Valor ($)": r["valor"]})
     if filas_rem:
+        _df_rem = pd.DataFrame(filas_rem)
         st.subheader("Remesas / líneas")
-        st.dataframe(pd.DataFrame(filas_rem), use_container_width=True, hide_index=True)
+        st.dataframe(_df_rem, use_container_width=True, hide_index=True)
+        _copiar_tabla(_df_rem, "cp_rndc_rem")
 
     st.markdown("---")
     if st.button("📤 Enviar al RNDC", type="primary", key="cr_send"):
@@ -439,7 +458,9 @@ def modulo_cargar_rndc(perfil):
             prog.progress(i / len(files_data), text=f"{i}/{len(files_data)} {d['archivo']}")
         prog.empty()
         st.subheader("Resultado del envío")
-        st.dataframe(pd.DataFrame(resultados), use_container_width=True, hide_index=True)
+        _df_res = pd.DataFrame(resultados)
+        st.dataframe(_df_res, use_container_width=True, hide_index=True)
+        _copiar_tabla(_df_res, "cp_rndc_envio")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -500,6 +521,7 @@ def modulo_consultar_remesas(perfil):
         except AttributeError:   # pandas < 2.1 usa applymap
             styler = df_res.style.applymap(_style_estado, subset=["Estado"])
         st.dataframe(styler, use_container_width=True, hide_index=True)
+        _copiar_tabla(df_res, "cp_cq")
         st.download_button("⬇️ Descargar resultados (.csv)",
                            df_res.to_csv(index=False).encode("utf-8-sig"),
                            file_name="consulta_remesas.csv", mime="text/csv", key="cq_dl")
@@ -737,14 +759,16 @@ def modulo_consultar_manifiesto(perfil):
         if len(encontrados) == 1:
             f = encontrados[0]
             st.subheader("📋 Información general del manifiesto")
-            kv = [{"Campo": k, "Valor": v} for k, v in f.items() if k != "Consulta"]
-            st.dataframe(pd.DataFrame(kv), use_container_width=True, hide_index=True)
+            _df_ficha = pd.DataFrame([{"Campo": k, "Valor": v} for k, v in f.items() if k != "Consulta"])
+            st.dataframe(_df_ficha, use_container_width=True, hide_index=True)
+            _copiar_tabla(_df_ficha, "cp_cm_ficha")
 
         # Tabla de lo consultado (una fila por manifiesto, columnas = Info General)
         st.subheader("📑 Manifiestos consultados")
         cols = ["N° Manifiesto"] + [lbl for lbl, _ in _MANIF_CAMPOS] + ["Consulta"]
         df = pd.DataFrame(curados, columns=cols)
         st.dataframe(df, use_container_width=True, hide_index=True)
+        _copiar_tabla(df, "cp_cm_tabla")
         st.download_button("⬇️ Descargar resultados (.csv)",
                            df.to_csv(index=False).encode("utf-8-sig"),
                            file_name="consulta_manifiestos.csv", mime="text/csv", key="cm_dl")
@@ -1675,7 +1699,9 @@ def modulo_cruzar_remesas(perfil):
             "Base": f["base_comparacion"],
             "¿Coincide valor factura con RG?": f["coincide_valor_factura_rg"],
             "Reconstruir": f["reconstruir"]} for f in filas]
-        st.dataframe(pd.DataFrame(tabla), use_container_width=True, hide_index=True)
+        _df_cruce = pd.DataFrame(tabla)
+        st.dataframe(_df_cruce, use_container_width=True, hide_index=True)
+        _copiar_tabla(_df_cruce, "cp_cruce")
 
         filtro = st.selectbox("Filtro de exportación", lib_cruce.FILTROS_EXPORT, key="crz_filtro")
         if st.button("💾 Generar Excel del cruce", key="crz_export"):
@@ -1742,14 +1768,16 @@ def modulo_extraer_rg(perfil):
         st.session_state["rg_filas"] = filas
 
     if "rg_tabla" in st.session_state:
-        st.dataframe(pd.DataFrame(st.session_state["rg_tabla"]),
-                     use_container_width=True, hide_index=True)
+        _df_rg_tabla = pd.DataFrame(st.session_state["rg_tabla"])
+        st.dataframe(_df_rg_tabla, use_container_width=True, hide_index=True)
+        _copiar_tabla(_df_rg_tabla, "cp_rg_tabla")
         filas = st.session_state.get("rg_filas", [])
         st.success(f"✓ {len(filas)} fila(s) extraídas de {len(files_data)} PDF(s).")
         if filas:
             df = pd.DataFrame(filas, columns=lib_extraer.COLUMNAS_EXPORT)
             with st.expander("Vista previa de las filas extraídas"):
                 st.dataframe(df, use_container_width=True, hide_index=True)
+                _copiar_tabla(df, "cp_rg_preview")
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as w:
                 df.to_excel(w, index=False)
