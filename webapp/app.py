@@ -656,7 +656,16 @@ _MANIF_CAMPOS = [
     ("Origen",           ["MANORIGEN", "NOMMUNICIPIOORIGEN", "MUNICIPIOORIGEN", "NOMORIGEN", "CODMUNICIPIOORIGENMANIFIESTO", "ORIGEN"]),
     ("Destino",          ["MANDESTINO", "NOMMUNICIPIODESTINO", "MUNICIPIODESTINO", "NOMDESTINO", "CODMUNICIPIODESTINOMANIFIESTO", "DESTINO"]),
     ("Observaciones",    ["OBSERVACIONES"]),
+    ("Estado",           ["ESTADO"]),
 ]
+
+def _estado_manifiesto_txt(cod):
+    cod = str(cod).strip().upper()
+    if cod == "CE":
+        return "Cumplido"
+    if cod == "AC":
+        return "Pendiente por cumplir"
+    return cod or "—"
 
 
 def _manif_curado(man, res):
@@ -670,7 +679,7 @@ def _manif_curado(man, res):
             if c in upper and str(upper[c]).strip():
                 val = upper[c]
                 break
-        fila[label] = val
+        fila[label] = _estado_manifiesto_txt(val) if label == "Estado" else val
     return fila
 
 
@@ -706,13 +715,13 @@ def modulo_consultar_manifiesto(perfil):
                     ok, res = False, str(e)
                 if ok:
                     fila = _manif_curado(man, res)
-                    fila["Estado"] = "✓ Encontrado"
+                    fila["Consulta"] = "✓ Encontrado"
                     full[man] = res            # guardar el completo para vista avanzada
                 else:
                     fila = {"N° Manifiesto": man}
                     for label, _ in _MANIF_CAMPOS:
                         fila[label] = ""
-                    fila["Estado"] = f"✗ {res}"
+                    fila["Consulta"] = f"✗ {res}"
                 curados.append(fila)
                 prog.progress(i / len(lista), text=f"{i}/{len(lista)}")
             prog.empty()
@@ -721,19 +730,19 @@ def modulo_consultar_manifiesto(perfil):
 
     curados = st.session_state.get("cm_result")
     if curados:
-        encontrados = [r for r in curados if r.get("Estado", "").startswith("✓")]
+        encontrados = [r for r in curados if r.get("Consulta", "").startswith("✓")]
         st.success(f"{len(curados)} manifiesto(s) consultado(s) · {len(encontrados)} encontrado(s).")
 
         # Ficha de información general del último encontrado (si hay uno solo)
         if len(encontrados) == 1:
             f = encontrados[0]
             st.subheader("📋 Información general del manifiesto")
-            kv = [{"Campo": k, "Valor": v} for k, v in f.items() if k != "Estado"]
+            kv = [{"Campo": k, "Valor": v} for k, v in f.items() if k != "Consulta"]
             st.dataframe(pd.DataFrame(kv), use_container_width=True, hide_index=True)
 
         # Tabla de lo consultado (una fila por manifiesto, columnas = Info General)
         st.subheader("📑 Manifiestos consultados")
-        cols = ["N° Manifiesto"] + [lbl for lbl, _ in _MANIF_CAMPOS] + ["Estado"]
+        cols = ["N° Manifiesto"] + [lbl for lbl, _ in _MANIF_CAMPOS] + ["Consulta"]
         df = pd.DataFrame(curados, columns=cols)
         st.dataframe(df, use_container_width=True, hide_index=True)
         st.download_button("⬇️ Descargar resultados (.csv)",
@@ -760,19 +769,6 @@ TIPOS_CUMPLIDO_MANIFIESTO = [
     "S — Suspensión",
 ]
 
-# Campos de metadata/solo-lectura del proceso 6 que NO se reenvían al cumplir
-# (el resto se reenvía tal cual = valores pactados/finales del viaje, etc.).
-_CMF_NO_ENVIAR = {
-    "INGRESOID", "PROCESOID", "USUARIOINGR", "FECHACREA", "FECHAING", "FECHAMOD",
-    "ESTADO", "CAUSAESTADO", "FINREAL", "ANOMES", "INTERACTIVO", "EMPRESA",
-    "CODIGOEMPRESA", "USUARIORADICADOR", "INGRESOIDMANIFIESTO",
-    "MANNUMERO_EMPRESALISTA", "MANNUMERO_EMPRESALISTA_CODE",
-    # Descripciones legibles (se envían solo los códigos, no los nom*):
-    "NOMTIPOCUMPLIDOMANIFIESTO", "NOMMOTIVOSUSPENSIONMANIFIESTO",
-    "NOMCONSECUENCIASUSPENSION", "NOMMOTIVOVALORADICIONAL",
-    "NOMMOTIVOVALORDESCUENTO", "NOMOPERACIONTRANSPORTE",
-}
-
 
 def modulo_cumplir_manifiesto(perfil):
     st.header("✅ Cumplir Manifiesto")
@@ -786,24 +782,6 @@ def modulo_cumplir_manifiesto(perfil):
     b1, b2 = st.columns([1, 1])
     b2.button("🗑 Limpiar módulo", key="cmf_clear", on_click=_cmf_limpiar)
 
-    # ── BOTÓN TEMPORAL: descubrir nombres reales de variables del cumplido (proceso 6)
-    if st.button("🐞 (temporal) Ver variables del CUMPLIDO (proceso 6)", key="cmf_dbg"):
-        man = st.session_state.get("cmf_in", "").strip()
-        if not man:
-            st.warning("Escribe el N° de manifiesto.")
-        else:
-            p = _perfil_corregir(perfil)
-            with st.spinner(f"Consultando cumplido (proceso 6) de {man}…"):
-                ok6, res6 = consultar_manifiesto_completo(man, p, procesoid=6)
-            if ok6 and isinstance(res6, dict):
-                st.success(f"Proceso 6 devolvió {len(res6)} variable(s) (manifiesto YA cumplido).")
-                st.dataframe(pd.DataFrame([{"Variable": k, "Valor": v} for k, v in res6.items()]),
-                             use_container_width=True, hide_index=True)
-            else:
-                st.info(f"Proceso 6 no devolvió datos: {res6}\n\n"
-                        "(Si el manifiesto NO está cumplido, no hay cumplido que mostrar. "
-                        "Usa un manifiesto YA cumplido para ver los nombres reales.)")
-
     if b1.button("🔍 Consultar manifiesto", key="cmf_consult"):
         man = st.session_state.get("cmf_in", "").strip()
         if not man:
@@ -811,37 +789,22 @@ def modulo_cumplir_manifiesto(perfil):
         else:
             p = _perfil_corregir(perfil)
             with st.spinner(f"Consultando manifiesto {man}…"):
-                # Proceso 4: datos generales del manifiesto. Proceso 6: formulario del
-                # cumplido (valores pactados/finales, horas, fletes…). Se combinan: la
-                # unión cubre TODOS los campos que el cumplido (proceso 6) necesita.
                 ok4, res4 = consultar_manifiesto_completo(man, p, procesoid=4)
-                ok6, res6 = consultar_manifiesto_completo(man, p, procesoid=6)
-            if not ok4 and not ok6:
+            if not ok4:
                 for k in ("cmf_full", "cmf_info"):
                     st.session_state.pop(k, None)
-                st.error(f"✗ No se pudo consultar el manifiesto: {res4 if not ok4 else res6}")
+                st.error(f"✗ No se pudo consultar el manifiesto: {res4}")
             else:
-                combinado = {}
-                if ok4 and isinstance(res4, dict):
-                    combinado.update(res4)
-                if ok6 and isinstance(res6, dict):
-                    combinado.update(res6)   # el cumplido (6) tiene prioridad
                 estado = ""
-                for k, v in combinado.items():
+                for k, v in res4.items():
                     if str(k).upper() == "ESTADO":
                         estado = str(v).strip().upper()
                         break
-                # Detectar si ya está cumplido: tipocumplidomanifiesto viene con valor (C/S)
-                tipo_cum = ""
-                for k, v in combinado.items():
-                    if str(k).lower() == "tipocumplidomanifiesto":
-                        tipo_cum = str(v).strip()
-                        break
                 st.session_state["cmf_man"] = man
-                st.session_state["cmf_full"] = combinado
-                st.session_state["cmf_info"] = _manif_curado(man, combinado)
+                st.session_state["cmf_full"] = res4
+                st.session_state["cmf_info"] = _manif_curado(man, res4)
                 st.session_state["cmf_estado"] = estado
-                st.session_state["cmf_ya_cumplido"] = bool(tipo_cum)
+                st.session_state["cmf_ya_cumplido"] = (estado == "CE")
 
     info = st.session_state.get("cmf_info")
     if not info:
@@ -852,17 +815,13 @@ def modulo_cumplir_manifiesto(perfil):
     ya_cumplido = st.session_state.get("cmf_ya_cumplido", False)
 
     if ya_cumplido:
-        st.warning(f"⚠ El manifiesto {man} ya está **CUMPLIDO**.")
+        st.warning(f"⚠ El manifiesto {man} ya está **CUMPLIDO** (estado CE).")
     else:
-        st.info(f"El manifiesto {man} está **pendiente por cumplir**. Puedes cumplirlo.")
+        st.info(f"El manifiesto {man} está **pendiente por cumplir** (estado AC). Puedes cumplirlo.")
 
     st.subheader("📋 Información general del manifiesto")
     st.dataframe(pd.DataFrame([{"Campo": k, "Valor": v} for k, v in info.items()]),
                  use_container_width=True, hide_index=True)
-
-    with st.expander("📦 Todos los datos que se reenviarán al cumplir (traídos del manifiesto)"):
-        st.dataframe(pd.DataFrame([{"Variable": k, "Valor": v} for k, v in full.items()]),
-                     use_container_width=True, hide_index=True)
 
     st.subheader("✍️ Datos del cumplido")
     c1, c2 = st.columns(2)
@@ -876,16 +835,29 @@ def modulo_cumplir_manifiesto(perfil):
     if st.button("✅ Guardar cumplido del manifiesto", type="primary",
                  disabled=(not confirma or ya_cumplido), key="cmf_send"):
         p = _perfil_corregir(perfil)
-        # Passthrough: reenviar TODOS los campos del proceso 6 (valores pactados/finales
-        # del viaje, horas, placa, conductor, etc.) excepto la metadata/solo-lectura;
-        # + tipo de cumplido + fecha de entrega (los 2 editables).
-        variables = {k: v for k, v in full.items() if str(k).upper() not in _CMF_NO_ENVIAR}
-        # Sobrescribir con las MISMAS claves (minúscula) que devuelve el consult,
-        # para no duplicar por casing. Estos 4 son los que mandan/edita el usuario.
-        variables["numnitempresatransporte"] = p.get("nit_socio", "")
-        variables["nummanifiestocarga"] = man
-        variables["tipocumplidomanifiesto"] = tipo
-        variables["fechaentregadocumentos"] = fecha_str
+        # Leer retencionfopat del combinado (viene de proceso 4), limpiar a entero
+        _rfopat_raw = ""
+        for _k, _v in full.items():
+            if str(_k).lower() == "retencionfopat":
+                _rfopat_raw = str(_v).strip()
+                break
+        try:
+            # colombiano: "38.533,96" → quitar puntos de miles, coma→punto
+            _clean = _rfopat_raw.replace(".", "").replace(",", ".") if "," in _rfopat_raw else _rfopat_raw
+            _rfopat = str(int(float(_clean))) if _rfopat_raw else "0"
+        except Exception:
+            _rfopat = "0"
+        variables = {
+            "NUMNITEMPRESATRANSPORTE": p.get("nit_socio", ""),
+            "NUMMANIFIESTOCARGA": man,
+            "TIPOCUMPLIDOMANIFIESTO": tipo,
+            "RETENCIONFOPAT": _rfopat,
+            "FECHAENTREGADOCUMENTOS": fecha_str,
+            "VALORADICIONALHORASCARGUE": "0",
+            "VALORDESCUENTOFLETE": "0",
+            "MOTIVOVALORDESCUENTOMANIFIESTO": "F",
+            "VALORSOBREANTICIPO": "0",
+        }
         with st.spinner("Registrando cumplido…"):
             ok, r = cumplir_manifiesto(variables, p)
         if ok:
@@ -1128,15 +1100,39 @@ def _auto_procesar_remesa(consec, nit_nuevo, sede, tipoid, cod_anul, cod_camb, p
     manif_recumplir = None
 
     def _recumplir_manifiesto():
-        """Si se anuló el cumplido del manifiesto, lo vuelve a cumplir con sus datos
-        originales (passthrough del proceso 6 capturado antes de anular)."""
+        """Re-cumple el manifiesto con los mismos 9 campos que usa cumplir_manifiesto,
+        tomando tipo y retencionfopat de los datos capturados (proceso 6) antes de anular."""
         if manif_recumplir is None:
             return
         put(f"6) Re-cumpliendo el manifiesto {manifiesto} con sus datos originales…")
-        variables = {k: v for k, v in manif_recumplir.items()
-                     if str(k).upper() not in _CMF_NO_ENVIAR}
-        variables["numnitempresatransporte"] = perfil.get("nit_socio", "")
-        variables["nummanifiestocarga"] = manifiesto
+        # Leer tipo cumplido y retencionfopat del snapshot capturado
+        _tipo_rm = ""
+        _rfopat_raw = ""
+        _fecha_rm = ""
+        for _k, _v in manif_recumplir.items():
+            kl = str(_k).lower()
+            if kl == "tipocumplidomanifiesto":
+                _tipo_rm = str(_v).strip()
+            elif kl == "retencionfopat":
+                _rfopat_raw = str(_v).strip()
+            elif kl == "fechaentregadocumentos":
+                _fecha_rm = str(_v).strip()
+        try:
+            _clean = _rfopat_raw.replace(".", "").replace(",", ".") if "," in _rfopat_raw else _rfopat_raw
+            _rfopat = str(int(float(_clean))) if _rfopat_raw else "0"
+        except Exception:
+            _rfopat = "0"
+        variables = {
+            "NUMNITEMPRESATRANSPORTE": perfil.get("nit_socio", ""),
+            "NUMMANIFIESTOCARGA": manifiesto,
+            "TIPOCUMPLIDOMANIFIESTO": _tipo_rm or "C",
+            "RETENCIONFOPAT": _rfopat,
+            "FECHAENTREGADOCUMENTOS": _fecha_rm,
+            "VALORADICIONALHORASCARGUE": "0",
+            "VALORDESCUENTOFLETE": "0",
+            "MOTIVOVALORDESCUENTOMANIFIESTO": "F",
+            "VALORSOBREANTICIPO": "0",
+        }
         okRM, resRM = cumplir_manifiesto(variables, perfil)
         if okRM:
             put(f"   ✓ Manifiesto re-cumplido (radicado {resRM.get('ingresoid','?')}).")

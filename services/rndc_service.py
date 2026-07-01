@@ -308,7 +308,7 @@ def consultar_remesa_completa(consecutivo_remesa, perfil, procesoid=3, timeout=2
     inner = _html.unescape(inner_raw)
 
     def _parse(texto):
-        for intento in (texto, texto.encode("iso-8859-1"),
+        for intento in (texto, texto.encode("iso-8859-1", errors="ignore"),
                         _re.sub(r'<\?xml[^?]*\?>', '', texto, count=1).strip()):
             try:
                 return ET.fromstring(intento)
@@ -432,7 +432,7 @@ def consultar_manifiesto_completo(num_manifiesto, perfil, procesoid=4, timeout=2
     inner = _html.unescape(inner_raw)
 
     def _parse(texto):
-        for intento in (texto, texto.encode("iso-8859-1"),
+        for intento in (texto, texto.encode("iso-8859-1", errors="ignore"),
                         _re.sub(r'<\?xml[^?]*\?>', '', texto, count=1).strip()):
             try:
                 return ET.fromstring(intento)
@@ -555,7 +555,7 @@ def _enviar_proceso_rndc(procesoid, variables, perfil, timeout=20):
     inner = _html.unescape(inner_raw)
 
     def _parse(texto):
-        for intento in (texto, texto.encode("iso-8859-1"),
+        for intento in (texto, texto.encode("iso-8859-1", errors="ignore"),
                         _re.sub(r'<\?xml[^?]*\?>', '', texto, count=1).strip()):
             try:
                 return ET.fromstring(intento)
