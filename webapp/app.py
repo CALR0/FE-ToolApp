@@ -95,9 +95,9 @@ def _copiar_tabla(df, key):
     tsv = df.to_csv(sep="\t", index=False)
     tsv_js = tsv.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
     _components.html(
-        f"""<button onclick="navigator.clipboard.writeText(`{tsv_js}`)
-                .then(()=>this.innerText='✓ Copiado')
-                .catch(()=>this.innerText='✗ Error')"
+        f"""<button onclick="var b=this;navigator.clipboard.writeText(`{tsv_js}`)
+                .then(()=>{{b.innerText='✓ Copiado';setTimeout(()=>b.innerText='📋 Copiar tabla',2000);}})
+                .catch(()=>{{b.innerText='✗ Error';setTimeout(()=>b.innerText='📋 Copiar tabla',2000);}})"
             style="font-size:12px;padding:2px 10px;cursor:pointer;border:1px solid #ccc;
                    border-radius:4px;background:#f0f2f6;">📋 Copiar tabla</button>""",
         height=32,
