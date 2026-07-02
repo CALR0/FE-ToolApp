@@ -90,6 +90,40 @@ def _style_estado(val):
     return ""
 
 
+# Límite de facturas por cargue en la web (el desktop usa 200; aquí 100 por pedido).
+_MAX_FACTURAS_WEB = 100
+
+
+def _get_cantidad_web(raw, total_disponible):
+    """Réplica de _get_cantidad del desktop (ui/excel_loader.py) con MAX=100.
+    Retorna (n, error_msg): n = cuántas facturas generar, error_msg=None si OK."""
+    MAX_FAC = _MAX_FACTURAS_WEB
+    raw = (raw or "").strip()
+    if raw == "":
+        if total_disponible > MAX_FAC:
+            return None, (
+                f"El Excel contiene {total_disponible} facturas, que supera el límite "
+                f"de {MAX_FAC} por cargue. Indica cuántas deseas generar (1 – {MAX_FAC})."
+            )
+        return total_disponible, None
+    if not raw.isdigit():
+        return None, "La cantidad debe ser un número entero."
+    n = int(raw)
+    if n == 0:
+        return None, "La cantidad debe ser al menos 1."
+    if n > MAX_FAC:
+        return None, (
+            f"El límite máximo por cargue es {MAX_FAC} facturas. "
+            f"Escribe un número entre 1 y {MAX_FAC}."
+        )
+    if n > total_disponible:
+        return None, (
+            f"Solo hay {total_disponible} factura{'s' if total_disponible != 1 else ''} "
+            f"en el Excel. Cambia el valor a {total_disponible} o menos."
+        )
+    return n, None
+
+
 def _copiar_tabla(df, key):
     """Botón pequeño que copia el DataFrame como TSV al portapapeles via JS."""
     tsv = df.to_csv(sep="\t", index=False)
@@ -345,6 +379,12 @@ def modulo_generar_excel(perfil):
                 else:
                     cond_values[clave] = "— No usar —"
 
+    st.subheader("Cantidad de facturas a generar")
+    cant_raw = st.text_input(
+        f"Cuántas generar (máx. {_MAX_FACTURAS_WEB}) — deja vacío para generar todas",
+        value="", key="gx_cant", max_chars=3,
+        placeholder="vacío = todas")
+
     ok, msg = lib_excel.validar(df, mapping, filtro)
     if not ok:
         st.warning(msg)
@@ -353,6 +393,11 @@ def modulo_generar_excel(perfil):
     col_a, col_b = st.columns([1, 1])
     if col_a.button("🔍 Vista previa / contar", key="gx_prev"):
         datos = lib_excel.parsear(df, mapping, filtro, cond_values, nit_cli, dig_cli, nom_cli)
+        n, err = _get_cantidad_web(cant_raw, len(datos))
+        if err:
+            st.warning(err)
+            return
+        datos = datos[:n]
         n_rem = sum(len(d["remesas"]) for d in datos)
         st.success(f"{len(datos)} factura(s) · {n_rem} remesas · Perfil: {perfil['nombre']}")
         if datos:
@@ -367,6 +412,11 @@ def modulo_generar_excel(perfil):
         if not datos:
             st.warning("No hay facturas que cumplan el filtro.")
             return
+        n, err = _get_cantidad_web(cant_raw, len(datos))
+        if err:
+            st.warning(err)
+            return
+        datos = datos[:n]
         prog = st.progress(0.0, text="Consultando radicados en el RNDC…")
         total = sum(len(d["remesas"]) for d in datos) or 1
         hecho = 0
