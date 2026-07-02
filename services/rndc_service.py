@@ -360,6 +360,21 @@ _RNDC_CONSULTA_MANIFIESTO_TMPL = """<?xml version='1.0' encoding='ISO-8859-1' ?>
 </root>"""
 
 
+def _campos_documento_regex(inner):
+    """Fallback: extrae los <tag>valor</tag> del <documento> por regex, sin exigir
+    XML bien formado. Sirve cuando ET.fromstring falla por un carácter suelto
+    (ej. un '&' sin escapar en un nombre/dirección) que rompe el parseo estricto."""
+    import re as _re
+    m = _re.search(r'<documento>(.*?)</documento>', inner, _re.DOTALL | _re.IGNORECASE)
+    if not m:
+        return None
+    cuerpo = m.group(1)
+    campos = {}
+    for mm in _re.finditer(r'<([A-Za-z_][\w.]*)>(.*?)</\1>', cuerpo, _re.DOTALL):
+        campos[mm.group(1)] = (mm.group(2) or "").strip()
+    return campos or None
+
+
 def consultar_manifiesto_completo(num_manifiesto, perfil, procesoid=4, timeout=20):
     """
     Consulta TODOS los campos de un manifiesto con `tipo=3` y `variables=*`
@@ -442,6 +457,11 @@ def consultar_manifiesto_completo(num_manifiesto, perfil, procesoid=4, timeout=2
 
     root_el = _parse(inner)
     if root_el is None:
+        # Fallback por regex: el XML puede traer un carácter que rompe ET pero los
+        # datos del <documento> están ahí (frecuente en manifiestos de Elogia).
+        campos = _campos_documento_regex(inner)
+        if campos:
+            return True, campos
         return False, f"No se pudo parsear la respuesta: {inner[:200]}"
 
     for tag in (".//ErrorMSG", ".//error"):
@@ -451,6 +471,9 @@ def consultar_manifiesto_completo(num_manifiesto, perfil, procesoid=4, timeout=2
 
     doc_el = root_el.find(".//documento")
     if doc_el is None:
+        campos = _campos_documento_regex(inner)
+        if campos:
+            return True, campos
         return False, f"Sin <documento> en la respuesta: {inner.strip()[:200]}"
 
     campos = {child.tag: (child.text or "").strip() for child in doc_el}
