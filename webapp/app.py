@@ -880,6 +880,30 @@ def modulo_cumplir_manifiesto(perfil):
                 st.session_state["cmf_estado"] = estado
                 st.session_state["cmf_ya_cumplido"] = (estado == "CE")
 
+                # Reset de los campos editables (evita arrastrar valores de una consulta previa)
+                st.session_state.pop("cmf_tipo", None)
+                st.session_state.pop("cmf_fecha", None)
+                if estado == "CE":
+                    # Traer tipo y fecha REALES del cumplido (proceso 6); fallback a res4
+                    okc, cumplido = consultar_manifiesto_completo(man, p, procesoid=6)
+                    src = cumplido if (okc and isinstance(cumplido, dict)) else res4
+                    _tcm = ""; _fed = ""
+                    for k, v in src.items():
+                        kl = str(k).lower()
+                        if kl == "tipocumplidomanifiesto":
+                            _tcm = str(v).strip().upper()
+                        elif kl == "fechaentregadocumentos":
+                            _fed = str(v).strip()
+                    if _tcm in ("C", "S"):
+                        st.session_state["cmf_tipo"] = (
+                            TIPOS_CUMPLIDO_MANIFIESTO[0] if _tcm == "C"
+                            else TIPOS_CUMPLIDO_MANIFIESTO[1])
+                    if _fed:
+                        try:
+                            st.session_state["cmf_fecha"] = datetime.strptime(_fed, "%d/%m/%Y").date()
+                        except Exception:
+                            pass
+
     info = st.session_state.get("cmf_info")
     if not info:
         return
@@ -984,15 +1008,30 @@ def _cumplir_autocalcular(res):
     return tv
 
 
+def _cumplir_times_from_res(res):
+    """Extrae los tiempos ya registrados del cumplido (proceso 5) tal cual vienen."""
+    tv = {}
+    for _e, fc, hc in lib_remesas.CUMPLIR_CARGUE_ROWS + lib_remesas.CUMPLIR_DESCARGUE_ROWS:
+        tv[fc] = res.get(fc.lower(), ""); tv[hc] = res.get(hc.lower(), "")
+    return tv
+
+
+def _cum_reset_field_keys():
+    """Borra las keys de los campos de tiempos para que se re-siembren en la nueva
+    consulta (evita el gotcha de Streamlit: value ignorado si la key ya existe)."""
+    for _e, fc, hc in lib_remesas.CUMPLIR_CARGUE_ROWS + lib_remesas.CUMPLIR_DESCARGUE_ROWS:
+        st.session_state.pop(f"cum_t_{fc}", None)
+        st.session_state.pop(f"cum_t_{hc}", None)
+
+
 def modulo_cumplir_remesa(perfil):
     st.header("✅ Cumplir Remesa")
-    st.caption("Consulta la remesa, elige el tipo de cumplido; los tiempos se calculan solos y son editables (proceso 5).")
+    st.caption("Consulta y cumple la remesa deseada.")
 
     consec_in = st.text_input("Consecutivo remesa", key="cum_in")
-    b1, b2, b3 = st.columns([1.2, 1.4, 1])
+    b1, b2 = st.columns([1.4, 1])
     do_consult = b1.button("🔍 Consultar remesa", key="cum_consult")
-    do_traer = b2.button("📥 Traer tiempos del cumplido", key="cum_traer")
-    if b3.button("🗑 Limpiar módulo", key="cum_clear"):
+    if b2.button("🗑 Limpiar módulo", key="cum_clear"):
         _limpiar_modulo(["cum_"])
 
     if do_consult:
@@ -1001,32 +1040,36 @@ def modulo_cumplir_remesa(perfil):
         with st.spinner(f"Consultando remesa {consec}…"):
             ok, res = consultar_remesa_completa(consec, p)
         if ok:
+            estado = (res.get("estado", "") or "").strip().upper()
+            ya_cumplida = (estado == "CE")
+            _cum_reset_field_keys()
             st.session_state["cum_res"] = res
             st.session_state["cum_consec"] = consec
-            st.session_state["cum_times"] = _cumplir_autocalcular(res)
-            st.session_state["cum_tipo"] = lib_remesas.CUMPLIR_TIPOS[0]
+            st.session_state["cum_ya_cumplida"] = ya_cumplida
+            st.session_state["cum_auto"] = False
+            if ya_cumplida:
+                # Ya cumplida → traer los tiempos REALES registrados (proceso 5)
+                with st.spinner("Trayendo tiempos reales del cumplido…"):
+                    ok5, res5 = consultar_remesa_completa(consec, p, procesoid=5)
+                if ok5:
+                    st.session_state["cum_times"] = _cumplir_times_from_res(res5)
+                    tcr = (res5.get("tipocumplidoremesa", "") or "").strip().upper()
+                    st.session_state["cum_tipo"] = (
+                        "C — Cumplido Normal" if tcr == "C"
+                        else "S — Suspensión" if tcr == "S"
+                        else lib_remesas.CUMPLIR_TIPOS[0])
+                else:
+                    st.session_state["cum_times"] = _cumplir_autocalcular(res)
+                    st.session_state["cum_tipo"] = lib_remesas.CUMPLIR_TIPOS[0]
+                st.session_state["cum_auto_times"] = {}
+            else:
+                # Pendiente → campos VACÍOS (el usuario los llena); los tiempos
+                # automáticos calculados quedan aparte para la casilla opcional.
+                st.session_state["cum_times"] = {}
+                st.session_state["cum_auto_times"] = _cumplir_autocalcular(res)
+                st.session_state["cum_tipo"] = lib_remesas.CUMPLIR_TIPOS[0]
         else:
             st.session_state.pop("cum_res", None)
-            st.error(f"✗ {res}")
-
-    if do_traer:
-        p = _perfil_corregir(perfil)
-        consec = _consec_efectivo(consec_in, p)
-        with st.spinner(f"Trayendo tiempos del cumplido de {consec}…"):
-            ok, res = consultar_remesa_completa(consec, p, procesoid=5)
-        if ok:
-            st.session_state["cum_res"] = res
-            st.session_state["cum_consec"] = consec
-            tv = {}
-            for _e, fc, hc in lib_remesas.CUMPLIR_CARGUE_ROWS + lib_remesas.CUMPLIR_DESCARGUE_ROWS:
-                tv[fc] = res.get(fc.lower(), ""); tv[hc] = res.get(hc.lower(), "")
-            st.session_state["cum_times"] = tv
-            tcr = (res.get("tipocumplidoremesa", "") or "").strip().upper()
-            if tcr in ("C", "S"):
-                st.session_state["cum_tipo"] = "C — Cumplido Normal" if tcr == "C" else "S — Suspensión"
-            if not (res.get("fechallegadacargue") or res.get("horallegadacargueremesa")):
-                st.warning("⚠ La remesa no tiene tiempos de cumplido registrados (¿no está cumplida?).")
-        else:
             st.error(f"✗ {res}")
 
     res = st.session_state.get("cum_res")
@@ -1034,37 +1077,69 @@ def modulo_cumplir_remesa(perfil):
         return
     consec = st.session_state.get("cum_consec", "")
     times = st.session_state.get("cum_times", {})
+    ya_cumplida = st.session_state.get("cum_ya_cumplida", False)
+
+    if ya_cumplida:
+        st.warning(f"⚠ La remesa {consec} ya está cumplida.")
+    else:
+        st.info(f"La remesa {consec} está pendiente por cumplir.")
 
     tipo_lbl = st.selectbox("Tipo de Cumplido", lib_remesas.CUMPLIR_TIPOS,
                             index=lib_remesas.CUMPLIR_TIPOS.index(st.session_state.get("cum_tipo", lib_remesas.CUMPLIR_TIPOS[0])),
-                            key="cum_tipo_sel")
+                            key="cum_tipo_sel", disabled=ya_cumplida)
     tipo = tipo_lbl.split(" ")[0]
     cant = res.get("cantidadcargada", "") or res.get("cantidadinformacioncarga", "")
     st.caption(f"Remesa {consec} · Cantidad cargada: {cant or '—'} · entregada: "
                f"{cant if tipo == 'C' else '0'} (automático)")
 
-    # Campos de tiempos editables (auto-rellenados). Cargue siempre; descargue si Normal.
+    # Citas pactadas (referencia, solo lectura) — se muestran siempre.
+    st.markdown("**📅 Citas pactadas**")
+    cc1, cc2 = st.columns(2)
+    cc1.text_input("Fecha cita cargue", value=res.get("fechacitapactadacargue", ""),
+                   disabled=True)
+    cc1.text_input("Hora cita cargue", value=res.get("horacitapactadacargue", ""),
+                   disabled=True)
+    cc2.text_input("Fecha cita descargue", value=res.get("fechacitapactadadescargue", ""),
+                   disabled=True)
+    cc2.text_input("Hora cita descargue", value=res.get("horacitapactadadescargueremesa", ""),
+                   disabled=True)
+
+    # Casilla de tiempos automáticos solo para pendientes (en cumplidas ya hay tiempos reales).
+    if not ya_cumplida:
+        def _cum_toggle_auto():
+            auto = st.session_state.get("cum_auto", False)
+            at = st.session_state.get("cum_auto_times", {})
+            for _e, fc, hc in lib_remesas.CUMPLIR_CARGUE_ROWS + lib_remesas.CUMPLIR_DESCARGUE_ROWS:
+                st.session_state[f"cum_t_{fc}"] = at.get(fc, "") if auto else ""
+                st.session_state[f"cum_t_{hc}"] = at.get(hc, "") if auto else ""
+
+        st.checkbox("🕒 Tiempos automáticos (calcular llegada/entrada/salida desde las citas pactadas)",
+                    key="cum_auto", on_change=_cum_toggle_auto)
+
+    # Campos de tiempos editables. Cargue siempre; descargue si Normal.
     nuevos = dict(times)
     st.markdown("**🕒 Cargue (origen)**")
     for etq, fc, hc in lib_remesas.CUMPLIR_CARGUE_ROWS:
         c1, c2, c3 = st.columns([1, 2, 1])
         c1.markdown(f"{etq}")
         nuevos[fc] = c2.text_input(f"Fecha {etq} cargue", value=times.get(fc, ""), key=f"cum_t_{fc}",
-                                   label_visibility="collapsed")
+                                   label_visibility="collapsed", disabled=ya_cumplida)
         nuevos[hc] = c3.text_input(f"Hora {etq} cargue", value=times.get(hc, ""), key=f"cum_t_{hc}",
-                                   label_visibility="collapsed")
+                                   label_visibility="collapsed", disabled=ya_cumplida)
     if tipo == "C":
         st.markdown("**🕒 Descargue (destino)**")
         for etq, fc, hc in lib_remesas.CUMPLIR_DESCARGUE_ROWS:
             c1, c2, c3 = st.columns([1, 2, 1])
             c1.markdown(f"{etq}")
             nuevos[fc] = c2.text_input(f"Fecha {etq} descargue", value=times.get(fc, ""), key=f"cum_t_{fc}",
-                                       label_visibility="collapsed")
+                                       label_visibility="collapsed", disabled=ya_cumplida)
             nuevos[hc] = c3.text_input(f"Hora {etq} descargue", value=times.get(hc, ""), key=f"cum_t_{hc}",
-                                       label_visibility="collapsed")
+                                       label_visibility="collapsed", disabled=ya_cumplida)
 
-    confirma = st.checkbox("Confirmo el cumplido (registra datos reales en el RNDC)", key="cum_ok")
-    if st.button("✅ Guardar cumplido", type="primary", disabled=not confirma, key="cum_send"):
+    confirma = st.checkbox("Confirmo el cumplido (registra datos reales en el RNDC)",
+                           key="cum_ok", disabled=ya_cumplida)
+    if st.button("✅ Guardar cumplido", type="primary",
+                 disabled=(not confirma or ya_cumplida), key="cum_send"):
         p = _perfil_corregir(perfil)
         variables = {
             "NUMNITEMPRESATRANSPORTE":  p.get("nit_socio", ""),
