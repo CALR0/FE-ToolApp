@@ -16,8 +16,10 @@ Secrets esperados (.streamlit/secrets.toml en Streamlit Cloud):
     rndc_password_corregir= "..."
 
     [perfiles.ut_elogia]
-    rndc_usuario  = "..."
-    rndc_password = "..."
+    rndc_usuario          = "..."
+    rndc_password         = "..."
+    rndc_usuario_corregir = "..."
+    rndc_password_corregir= "..."
 """
 import os
 
@@ -61,6 +63,8 @@ PERFILES = {{
         "carpeta":       "FACTURAS_GENERADAS_ELOGIA",
         "rndc_usuario":  "{g("ut_elogia", "rndc_usuario")}",
         "rndc_password": "{g("ut_elogia", "rndc_password")}",
+        "rndc_usuario_corregir":  "{g("ut_elogia", "rndc_usuario_corregir")}",
+        "rndc_password_corregir": "{g("ut_elogia", "rndc_password_corregir")}",
         "nit_ut":              "901101271",
         "nombre_ut":           "UNION TEMPORAL AMERICAN LOGISTIC UT",
         "carpeta_reconstruir": "FACTURAS_RECONSTRUIDAS_ELOGIA",

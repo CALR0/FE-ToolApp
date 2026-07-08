@@ -844,6 +844,28 @@ TIPOS_CUMPLIDO_MANIFIESTO = [
 ]
 
 
+def _cmf_get(d, key, default=""):
+    """Lee un valor del dict del RNDC por nombre de variable (case-insensitive)."""
+    for k, v in d.items():
+        if str(k).lower() == key:
+            s = str(v).strip()
+            return s if s else default
+    return default
+
+
+def _cmf_num(raw):
+    """Normaliza un valor monetario a entero string; vacío/ inválido → '0'.
+    Acepta formato colombiano ('38.533,96')."""
+    raw = str(raw or "").strip()
+    if not raw:
+        return "0"
+    try:
+        _clean = raw.replace(".", "").replace(",", ".") if "," in raw else raw
+        return str(int(float(_clean)))
+    except Exception:
+        return "0"
+
+
 def modulo_cumplir_manifiesto(perfil):
     st.header("✅ Cumplir Manifiesto")
 
@@ -881,19 +903,16 @@ def modulo_cumplir_manifiesto(perfil):
                 st.session_state["cmf_ya_cumplido"] = (estado == "CE")
 
                 # Reset de los campos editables (evita arrastrar valores de una consulta previa)
-                st.session_state.pop("cmf_tipo", None)
-                st.session_state.pop("cmf_fecha", None)
+                for _k in ("cmf_tipo", "cmf_fecha", "cmf_rfopat", "cmf_vahc", "cmf_vdf", "cmf_vsa"):
+                    st.session_state.pop(_k, None)
+                # Fuente de los valores del cumplido: proceso 6 si está cumplido, si no res4
+                src = res4
                 if estado == "CE":
                     # Traer tipo y fecha REALES del cumplido (proceso 6); fallback a res4
                     okc, cumplido = consultar_manifiesto_completo(man, p, procesoid=6)
                     src = cumplido if (okc and isinstance(cumplido, dict)) else res4
-                    _tcm = ""; _fed = ""
-                    for k, v in src.items():
-                        kl = str(k).lower()
-                        if kl == "tipocumplidomanifiesto":
-                            _tcm = str(v).strip().upper()
-                        elif kl == "fechaentregadocumentos":
-                            _fed = str(v).strip()
+                    _tcm = _cmf_get(src, "tipocumplidomanifiesto").upper()
+                    _fed = _cmf_get(src, "fechaentregadocumentos")
                     if _tcm in ("C", "S"):
                         st.session_state["cmf_tipo"] = (
                             TIPOS_CUMPLIDO_MANIFIESTO[0] if _tcm == "C"
@@ -903,6 +922,11 @@ def modulo_cumplir_manifiesto(perfil):
                             st.session_state["cmf_fecha"] = datetime.strptime(_fed, "%d/%m/%Y").date()
                         except Exception:
                             pass
+                # Sembrar los campos de valores tal cual los trae la consulta
+                st.session_state["cmf_rfopat"] = _cmf_get(src, "retencionfopat")
+                st.session_state["cmf_vahc"] = _cmf_get(src, "valoradicionalhorascargue")
+                st.session_state["cmf_vdf"] = _cmf_get(src, "valordescuentoflete")
+                st.session_state["cmf_vsa"] = _cmf_get(src, "valorsobreanticipo")
 
     info = st.session_state.get("cmf_info")
     if not info:
@@ -928,33 +952,28 @@ def modulo_cumplir_manifiesto(perfil):
     tipo = tipo_lbl.split(" ")[0]
     fecha_str = fecha.strftime("%d/%m/%Y") if fecha else ""
 
+    # Valores del cumplido (traídos de la consulta, editables). Vacío = 0 al enviar.
+    v1, v2, v3, v4 = st.columns(4)
+    v1.text_input("Retención FOPAT", key="cmf_rfopat", disabled=ya_cumplido)
+    v2.text_input("Valor adicional horas cargue", key="cmf_vahc", disabled=ya_cumplido)
+    v3.text_input("Valor descuento flete", key="cmf_vdf", disabled=ya_cumplido)
+    v4.text_input("Valor sobreanticipo", key="cmf_vsa", disabled=ya_cumplido)
+
     confirma = st.checkbox("Confirmo el cumplido (registra datos reales en el RNDC)",
                            key="cmf_ok", disabled=ya_cumplido)
     if st.button("✅ Guardar cumplido del manifiesto", type="primary",
                  disabled=(not confirma or ya_cumplido), key="cmf_send"):
         p = _perfil_corregir(perfil)
-        # Leer retencionfopat del combinado (viene de proceso 4), limpiar a entero
-        _rfopat_raw = ""
-        for _k, _v in full.items():
-            if str(_k).lower() == "retencionfopat":
-                _rfopat_raw = str(_v).strip()
-                break
-        try:
-            # colombiano: "38.533,96" → quitar puntos de miles, coma→punto
-            _clean = _rfopat_raw.replace(".", "").replace(",", ".") if "," in _rfopat_raw else _rfopat_raw
-            _rfopat = str(int(float(_clean))) if _rfopat_raw else "0"
-        except Exception:
-            _rfopat = "0"
         variables = {
             "NUMNITEMPRESATRANSPORTE": p.get("nit_socio", ""),
             "NUMMANIFIESTOCARGA": man,
             "TIPOCUMPLIDOMANIFIESTO": tipo,
-            "RETENCIONFOPAT": _rfopat,
+            "RETENCIONFOPAT": _cmf_num(st.session_state.get("cmf_rfopat", "")),
             "FECHAENTREGADOCUMENTOS": fecha_str,
-            "VALORADICIONALHORASCARGUE": "0",
-            "VALORDESCUENTOFLETE": "0",
+            "VALORADICIONALHORASCARGUE": _cmf_num(st.session_state.get("cmf_vahc", "")),
+            "VALORDESCUENTOFLETE": _cmf_num(st.session_state.get("cmf_vdf", "")),
             "MOTIVOVALORDESCUENTOMANIFIESTO": "F",
-            "VALORSOBREANTICIPO": "0",
+            "VALORSOBREANTICIPO": _cmf_num(st.session_state.get("cmf_vsa", "")),
         }
         with st.spinner("Registrando cumplido…"):
             ok, r = cumplir_manifiesto(variables, p)
