@@ -249,14 +249,15 @@ def _t_prefijo_consecutivo_remesa(inv):
 
 def _t_corregir_scheme_id_invoiceline(inv):
     """
-    Corrige cbc:ID con schemeID vacio en cada InvoiceLine.
-    Si schemeID="" lo reemplaza por schemeID="1".
-    Si ya tiene un valor entre las comillas, no lo toca.
+    Corrige cbc:ID con schemeID vacio o "0" en cada InvoiceLine.
+    Si schemeID="" o schemeID="0" lo reemplaza por schemeID="1".
+    Si ya tiene otro valor entre las comillas, no lo toca.
     """
     def _fix(m):
-        if m.group(1):          # ya tiene valor -> sin cambio
+        val = m.group(1)
+        if val and val != "0":   # ya tiene valor valido -> sin cambio
             return m.group(0)
-        return m.group(0).replace('schemeID=""', 'schemeID="1"')
+        return '<cbc:ID schemeID="1">'   # vacio o "0" -> "1"
 
     return re.sub(r'<cbc:ID schemeID="([^"]*)">', _fix, inv)
 

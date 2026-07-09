@@ -126,7 +126,14 @@ def actualizar_radicados_str(contenido, perfil, prefijo_remesa=False, peso_fijo=
         consec_raw = _get_prop(linea_orig, "02").strip()
         if not consec_raw:
             continue
-        consec_rndc = ("0" + consec_raw) if prefijo_remesa else consec_raw
+        # Para Elogia el consecutivo real lleva el "0" adelante; se agrega solo si el
+        # XML no lo trae ya (evita duplicar el 0).
+        if prefijo_remesa and not consec_raw.startswith("0"):
+            consec_rndc = "0" + consec_raw
+        else:
+            consec_rndc = consec_raw
+        # El consecutivo con 0 se escribe en la línea del XML y se muestra en la tabla.
+        consec_final = consec_rndc
         try:
             ok, res = consultar_radicado_remesa(consec_rndc, perfil)
         except Exception:
@@ -134,15 +141,17 @@ def actualizar_radicados_str(contenido, perfil, prefijo_remesa=False, peso_fijo=
         radicado = res.get("radicado", "") if ok else ""
         peso = peso_fijo if peso_fijo is not None else (res.get("peso", "") if ok else "")
         if not radicado and peso == "":
-            resultados.append({"consecutivo": consec_raw, "radicado": "", "peso": ""})
+            resultados.append({"consecutivo": consec_final, "radicado": "", "peso": ""})
             continue
         linea_nueva = linea_orig
         if radicado:
             linea_nueva = _set_prop(linea_nueva, "01", radicado)
+        if consec_final != consec_raw:
+            linea_nueva = _set_prop(linea_nueva, "02", consec_final)
         if peso != "":
             linea_nueva = _set_peso(linea_nueva, peso)
         inv_actualizado = inv_actualizado.replace(linea_orig, linea_nueva, 1)
-        resultados.append({"consecutivo": consec_raw, "radicado": radicado, "peso": peso})
+        resultados.append({"consecutivo": consec_final, "radicado": radicado, "peso": peso})
 
     if m_cdata:
         contenido_nuevo = contenido[:m_cdata.start(2)] + inv_actualizado + contenido[m_cdata.end(2):]
