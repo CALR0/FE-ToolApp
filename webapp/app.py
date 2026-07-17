@@ -37,6 +37,7 @@ from services.rndc_service import (
     consultar_radicado_remesa, consultar_remesa_completa,
     anular_cumplido_remesa, anular_cumplido_manifiesto, corregir_remesa,
     cumplir_remesa, consultar_manifiesto_completo, cumplir_manifiesto,
+    consultar_monitoreo_manifiesto, consultar_remesas_por_manifiesto,
 )
 
 from webapp import lib_excel
@@ -143,6 +144,16 @@ def _perfil_corregir(perfil):
     Igual que _perfil() de los módulos corregir/anular/cumplir del desktop."""
     p = dict(perfil)
     u, pw = p.get("rndc_usuario_corregir"), p.get("rndc_password_corregir")
+    if u and pw:
+        p["rndc_usuario"], p["rndc_password"] = u, pw
+    return p
+
+
+def _perfil_monitoreo(perfil):
+    """Sustituye credenciales por las de monitoreo (rndc_usuario_monitoreo) si existen.
+    Para consultar tiempos logísticos (proceso 60) con el usuario de la EMF."""
+    p = dict(perfil)
+    u, pw = p.get("rndc_usuario_monitoreo"), p.get("rndc_password_monitoreo")
     if u and pw:
         p["rndc_usuario"], p["rndc_password"] = u, pw
     return p
@@ -1010,6 +1021,172 @@ def modulo_anular_cumplido_manifiesto(perfil):
             st.success(f"✓ Cumplido del manifiesto {man} anulado. Radicado: {r.get('ingresoid','?')}")
         else:
             st.error(f"✗ {r}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MÓDULO: Consultar tiempos logísticos (monitoreo de manifiesto, proceso 60)
+# ─────────────────────────────────────────────────────────────────────────────
+# Campos amigables de cada punto de control (etiqueta → variable del RNDC).
+_MONITOREO_CAMPOS = [
+    ("Punto de control", "codpuntocontrol"),
+    ("Placa",            "numplaca"),
+    ("Fecha llegada",    "fechallegada"),
+    ("Hora llegada",     "horallegada"),
+    ("Fecha salida",     "fechasalida"),
+    ("Hora salida",      "horasalida"),
+    ("Minutos en punto", "minutos"),
+    ("Minutos monitoreo", "minutosmonitoreo"),
+    ("Latitud",          "latitud"),
+    ("Longitud",         "longitud"),
+    ("Estado",           "estado"),
+]
+
+
+def modulo_consultar_tiempos(perfil):
+    st.header("🛰️ Consultar Tiempos Logísticos")
+    st.caption("Consulta los tiempos de monitoreo por N° de manifiesto o por placa (proceso 60).")
+
+    def _tl_limpiar():
+        st.session_state["tl_in"] = ""
+        st.session_state["tl_placa"] = ""
+        for k in ("tl_docs", "tl_man", "tl_radicado", "tl_placa_res", "tl_citas"):
+            st.session_state.pop(k, None)
+
+    c1, c2 = st.columns(2)
+    c1.text_input("N° Manifiesto de carga", key="tl_in")
+    c2.text_input("Placa (opcional)", key="tl_placa")
+    b1, b2 = st.columns([1, 1])
+    b2.button("🗑 Limpiar módulo", key="tl_clear", on_click=_tl_limpiar)
+
+    if b1.button("🔍 Consultar tiempos", type="primary", key="tl_btn"):
+        man = st.session_state.get("tl_in", "").strip()
+        placa = st.session_state.get("tl_placa", "").strip()
+        if not man and not placa:
+            st.warning("Escribe el N° de manifiesto o la placa.")
+        elif not perfil.get("nit_monitoreo"):
+            st.error("Este perfil no tiene configurada la empresa de monitoreo "
+                     "(nit_monitoreo). Por ahora solo está disponible para UT Elogia.")
+        else:
+            radicado = ""
+            fallo = False
+            # Si hay N° de manifiesto, se deriva su radicado (ingresoid)
+            if man:
+                with st.spinner(f"Buscando radicado del manifiesto {man}…"):
+                    okm, resm = consultar_manifiesto_completo(man, _perfil_corregir(perfil), procesoid=4)
+                if okm and isinstance(resm, dict):
+                    radicado = _cmf_get(resm, "ingresoidmanifiesto") or _cmf_get(resm, "ingresoid")
+                if not radicado:
+                    st.session_state.pop("tl_docs", None)
+                    st.error(f"No se encontró el radicado del manifiesto {man}. "
+                             f"Detalle: {resm if not okm else 'sin radicado en la respuesta'}")
+                    fallo = True
+            if not fallo:
+                # Consultar el monitoreo (proceso 60) por radicado y/o placa
+                with st.spinner("Consultando tiempos de monitoreo…"):
+                    ok, docs = consultar_monitoreo_manifiesto(
+                        _perfil_monitoreo(perfil), radicado_manifiesto=radicado, placa=placa)
+                if ok:
+                    st.session_state["tl_docs"] = docs
+                    st.session_state["tl_man"] = man
+                    st.session_state["tl_radicado"] = radicado
+                    st.session_state["tl_placa_res"] = placa
+                    # Citas pactadas (cargue/descargue) desde la remesa del manifiesto
+                    citas = {}
+                    _man_citas = man or ""
+                    if not _man_citas:
+                        # Sin N° de manifiesto (búsqueda por placa) → tomarlo del monitoreo si viene
+                        for d in docs:
+                            _low = {str(k).lower(): v for k, v in d.items()}
+                            if _low.get("nummanifiestocarga"):
+                                _man_citas = _low["nummanifiestocarga"]
+                                break
+                    if _man_citas:
+                        okr, rems = consultar_remesas_por_manifiesto(_man_citas, _perfil_corregir(perfil))
+                        if okr and rems:
+                            _r = {str(k).lower(): v for k, v in rems[0].items()}
+                            citas = {
+                                "f_carg": _r.get("fechacitapactadacargue", ""),
+                                "h_carg": _r.get("horacitapactadacargue", ""),
+                                "f_desc": _r.get("fechacitapactadadescargue", ""),
+                                "h_desc": _r.get("horacitapactadadescargueremesa", ""),
+                            }
+                    st.session_state["tl_citas"] = citas
+                else:
+                    st.session_state.pop("tl_docs", None)
+                    st.error(f"✗ {docs}")
+
+    docs = st.session_state.get("tl_docs")
+    if not docs:
+        return
+    man = st.session_state.get("tl_man", "")
+    radicado = st.session_state.get("tl_radicado", "")
+    placa = st.session_state.get("tl_placa_res", "")
+    filtro_txt = " · ".join(
+        [t for t in (f"Manifiesto {man}" if man else "",
+                     f"Radicado {radicado}" if radicado else "",
+                     f"Placa {placa}" if placa else "") if t])
+    st.success(f"{filtro_txt} · {len(docs)} punto(s) de control.")
+
+    # ── Tiempos origen (punto 1 = cargue) y destino (último punto = descargue) ──
+    citas = st.session_state.get("tl_citas", {}) or {}
+
+    def _pc_num(d):
+        try:
+            return int(str({str(k).lower(): v for k, v in d.items()}.get("codpuntocontrol", "")).strip() or 0)
+        except Exception:
+            return 0
+
+    docs_orden = sorted(docs, key=_pc_num)
+    # Origen = punto de control 1; destino = el último punto > 1 (si existe).
+    origen = next((d for d in docs_orden if _pc_num(d) == 1), None)
+    destino = next((d for d in reversed(docs_orden) if _pc_num(d) > 1), None)
+
+    def _ficha(d, f_cita, h_cita):
+        low = {str(k).lower(): v for k, v in d.items()} if d else {}
+        return pd.DataFrame([
+            {"Campo": "Fecha cita pactada", "Valor": f_cita or "—"},
+            {"Campo": "Hora cita pactada",  "Valor": h_cita or "—"},
+            {"Campo": "Fecha llegada",      "Valor": low.get("fechallegada", "") or "—"},
+            {"Campo": "Hora llegada",       "Valor": low.get("horallegada", "") or "—"},
+            {"Campo": "Fecha salida",       "Valor": low.get("fechasalida", "") or "—"},
+            {"Campo": "Hora salida",        "Valor": low.get("horasalida", "") or "—"},
+            {"Campo": "Minutos en punto",   "Valor": low.get("minutos", "") or "—"},
+        ])
+
+    co, cd = st.columns(2)
+    with co:
+        st.markdown("**🚚 Tiempos origen (cargue)**")
+        if origen is not None:
+            st.dataframe(_ficha(origen, citas.get("f_carg", ""), citas.get("h_carg", "")),
+                         use_container_width=True, hide_index=True)
+        else:
+            st.info("No hay registro de monitoreo en el origen.")
+    with cd:
+        st.markdown("**🏁 Tiempos destino (descargue)**")
+        if destino is not None:
+            st.dataframe(_ficha(destino, citas.get("f_desc", ""), citas.get("h_desc", "")),
+                         use_container_width=True, hide_index=True)
+        else:
+            st.info("Solo se ha reportado el origen; aún no hay registro en el destino.")
+
+    # Tabla completa (una fila por punto de control)
+    st.markdown("**📑 Todos los puntos de control**")
+    filas = []
+    for d in docs_orden:
+        low = {str(k).lower(): v for k, v in d.items()}
+        filas.append({etq: low.get(var, "") for etq, var in _MONITOREO_CAMPOS})
+    df = pd.DataFrame(filas, columns=[etq for etq, _ in _MONITOREO_CAMPOS])
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    _copiar_tabla(df, "cp_tl")
+    st.download_button("⬇️ Descargar (.csv)", df.to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"tiempos_{man or radicado or placa}.csv", mime="text/csv", key="tl_dl")
+
+    # Variables crudas (avanzado)
+    with st.expander("🔧 Ver todas las variables crudas del RNDC (avanzado)"):
+        for i, d in enumerate(docs, 1):
+            st.markdown(f"**Punto de control #{i}**")
+            st.dataframe(pd.DataFrame([{"Variable": k, "Valor": v} for k, v in d.items()]),
+                         use_container_width=True, hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1950,6 +2127,7 @@ def _grupos(perfil):
         },
         "📑 Manifiesto": {
             "Consultar manifiesto": modulo_consultar_manifiesto,
+            "Consultar tiempos logísticos": modulo_consultar_tiempos,
             "Cumplir manifiesto": modulo_cumplir_manifiesto,
             "Anular cumplido manifiesto": modulo_anular_cumplido_manifiesto,
         },

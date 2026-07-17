@@ -483,6 +483,184 @@ def consultar_manifiesto_completo(num_manifiesto, perfil, procesoid=4, timeout=2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MONITOREO DE MANIFIESTO (tiempos logísticos) — RNDC proceso 60 (tipo 3 = consulta)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _post_consulta_multi(rndc_xml, timeout=20):
+    """POST de una consulta RNDC (tipo=3) y parseo de TODOS los <documento> por
+    regex (tolerante a XML mal formado). Retorna (ok, list[dict] | str_error).
+    Si no hay documentos pero tampoco error, retorna (True, [])."""
+    import html as _html, re as _re
+
+    soap_body = _RNDC_CONSULTA_SOAP_ENVELOPE.format(
+        rndc_xml_escaped=_html.escape(rndc_xml))
+    url     = _RNDC_CONSULTA_ENDPOINT + _RNDC_CONSULTA_SOAP_PATH
+    headers = {
+        "Content-Type": "text/xml; charset=UTF-8",
+        "SOAPAction":   _RNDC_CONSULTA_ACTION,
+    }
+    try:
+        resp = _requests.post(url, data=soap_body.encode("utf-8"),
+                              headers=headers, timeout=timeout)
+    except _requests.exceptions.ConnectionError:
+        return False, f"Sin conexión a {_RNDC_CONSULTA_ENDPOINT}"
+    except _requests.exceptions.Timeout:
+        return False, f"Tiempo de espera agotado ({timeout}s)"
+    except Exception as e:
+        return False, str(e)[:180]
+
+    inner_raw = None
+    m = _re.search(r'<[^>]*:?return[^>]*>(.*?)</[^>]*:?return>',
+                   resp.text, _re.DOTALL | _re.IGNORECASE)
+    if m:
+        inner_raw = m.group(1).strip()
+    if not inner_raw:
+        m2 = _re.search(r'(<root[^>]*>.*?</root>)', resp.text,
+                        _re.DOTALL | _re.IGNORECASE)
+        if m2:
+            inner_raw = m2.group(1).strip()
+    if not inner_raw:
+        return False, f"Respuesta no reconocida: {resp.text.strip()[:200]}"
+
+    inner = _html.unescape(inner_raw)
+
+    merr = _re.search(r'<ErrorMSG>(.*?)</ErrorMSG>', inner, _re.DOTALL | _re.IGNORECASE)
+    if merr and merr.group(1).strip():
+        return False, merr.group(1).strip()
+
+    docs = []
+    for md in _re.finditer(r'<documento>(.*?)</documento>', inner, _re.DOTALL | _re.IGNORECASE):
+        cuerpo = md.group(1)
+        campos = {}
+        for mm in _re.finditer(r'<([A-Za-z_][\w.]*)>(.*?)</\1>', cuerpo, _re.DOTALL):
+            campos[mm.group(1)] = (mm.group(2) or "").strip()
+        if campos:
+            docs.append(campos)
+    return True, docs
+
+_RNDC_MONITOREO_TMPL = """<?xml version='1.0' encoding='ISO-8859-1' ?>
+<root>
+  <acceso>
+    <username>{usuario}</username>
+    <password>{password}</password>
+  </acceso>
+  <solicitud>
+    <tipo>3</tipo>
+    <procesoid>60</procesoid>
+  </solicitud>
+  <variables>*</variables>
+  <documento>
+    <NUMIDGPS>'{nit_gps}'</NUMIDGPS>
+    <NUMNITEMPRESATRANSPORTE>'{nit_empresa}'</NUMNITEMPRESATRANSPORTE>
+{filtros}
+  </documento>
+</root>"""
+
+
+def consultar_monitoreo_manifiesto(perfil, radicado_manifiesto="", placa="", timeout=20):
+    """
+    Consulta los tiempos logísticos (monitoreo) de un manifiesto — proceso 60,
+    tipo=3, variables=*. Filtra por radicado del manifiesto (INGRESOIDMANIFIESTO)
+    y/o por placa del vehículo (NUMPLACA). Debe pasarse al menos uno de los dos.
+
+    Devuelve TODOS los puntos de control (el RNDC entrega un <documento> por cada
+    punto de control monitoreado).
+
+    Credenciales/empresa de monitoreo (usa del perfil, con fallback):
+        - usuario/password: rndc_usuario_monitoreo / rndc_password_monitoreo
+          (si no están, cae a rndc_usuario / rndc_password).
+        - NUMIDGPS: nit_monitoreo (NIT de la empresa de monitoreo de flota).
+        - NUMNITEMPRESATRANSPORTE: nit_socio (empresa de transporte del perfil).
+
+    Retorna:
+        (ok: bool, resultado)
+        Si ok=True  → list[dict] con los campos de cada punto de control.
+        Si ok=False → str con el mensaje de error.
+    """
+    if not REQUESTS_OK:
+        return False, "La librería 'requests' no está instalada."
+
+    import html as _html, xml.etree.ElementTree as ET, re as _re
+
+    usuario  = perfil.get("rndc_usuario_monitoreo") or perfil.get("rndc_usuario", "")
+    password = perfil.get("rndc_password_monitoreo") or perfil.get("rndc_password", "")
+    nit_gps  = perfil.get("nit_monitoreo", "")
+    nit_emp  = perfil.get("nit_socio", "")
+
+    if not nit_gps:
+        return False, ("El perfil no tiene configurado 'nit_monitoreo' (NIT de la "
+                       "empresa de monitoreo). Configúralo para consultar tiempos.")
+
+    radicado = str(radicado_manifiesto or "").strip()
+    placa    = str(placa or "").strip()
+    if not radicado and not placa:
+        return False, "Debes indicar el radicado del manifiesto o la placa del vehículo."
+
+    filtros = []
+    if radicado:
+        filtros.append(f"    <INGRESOIDMANIFIESTO>'{_html.escape(radicado)}'</INGRESOIDMANIFIESTO>")
+    if placa:
+        filtros.append(f"    <NUMPLACA>'{_html.escape(placa)}'</NUMPLACA>")
+
+    rndc_xml = _RNDC_MONITOREO_TMPL.format(
+        usuario=_html.escape(usuario),
+        password=_html.escape(password),
+        nit_gps=_html.escape(str(nit_gps)),
+        nit_empresa=_html.escape(str(nit_emp)),
+        filtros="\n".join(filtros),
+    )
+    ok, docs = _post_consulta_multi(rndc_xml, timeout)
+    if not ok:
+        return False, docs
+    if not docs:
+        return False, "Sin datos de monitoreo para ese manifiesto (¿aún no reportan tiempos?)."
+    return True, docs
+
+
+_RNDC_REMESAS_POR_MANIF_TMPL = """<?xml version='1.0' encoding='ISO-8859-1' ?>
+<root>
+  <acceso>
+    <username>{usuario}</username>
+    <password>{password}</password>
+  </acceso>
+  <solicitud>
+    <tipo>3</tipo>
+    <procesoid>3</procesoid>
+  </solicitud>
+  <variables>*</variables>
+  <documento>
+    <NUMNITEMPRESATRANSPORTE>'{nit_empresa}'</NUMNITEMPRESATRANSPORTE>
+    <NUMMANIFIESTOCARGA>'{num_manifiesto}'</NUMMANIFIESTOCARGA>
+  </documento>
+</root>"""
+
+
+def consultar_remesas_por_manifiesto(num_manifiesto, perfil, timeout=20):
+    """
+    Consulta las remesas asociadas a un manifiesto (proceso 3, tipo=3, variables=*),
+    filtrando por NUMMANIFIESTOCARGA. Útil para leer las citas pactadas de
+    cargue/descargue del viaje. Retorna (ok, list[dict]) — una remesa por documento.
+    """
+    if not REQUESTS_OK:
+        return False, "La librería 'requests' no está instalada."
+
+    import html as _html
+
+    rndc_xml = _RNDC_REMESAS_POR_MANIF_TMPL.format(
+        usuario=_html.escape(perfil.get("rndc_usuario", "")),
+        password=_html.escape(perfil.get("rndc_password", "")),
+        nit_empresa=_html.escape(perfil.get("nit_socio", "")),
+        num_manifiesto=_html.escape(str(num_manifiesto)),
+    )
+    ok, docs = _post_consulta_multi(rndc_xml, timeout)
+    if not ok:
+        return False, docs
+    if not docs:
+        return False, "Sin remesas para ese manifiesto."
+    return True, docs
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CORREGIR REMESA — RNDC proceso 38 (tipo 1 = enviar/registrar)
 # ─────────────────────────────────────────────────────────────────────────────
 
