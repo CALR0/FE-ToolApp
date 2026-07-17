@@ -1049,86 +1049,104 @@ def modulo_consultar_tiempos(perfil):
     def _tl_limpiar():
         st.session_state["tl_in"] = ""
         st.session_state["tl_placa"] = ""
-        for k in ("tl_docs", "tl_man", "tl_radicado", "tl_placa_res", "tl_citas"):
+        for k in ("tl_res", "tl_placa_res"):
             st.session_state.pop(k, None)
 
-    c1, c2 = st.columns(2)
-    c1.text_input("N° Manifiesto de carga", key="tl_in")
+    c1, c2 = st.columns([2, 1])
+    c1.text_area("N° Manifiesto(s) de carga (coma, espacio o salto de línea)",
+                 height=100, key="tl_in")
     c2.text_input("Placa (opcional)", key="tl_placa")
     b1, b2 = st.columns([1, 1])
     b2.button("🗑 Limpiar módulo", key="tl_clear", on_click=_tl_limpiar)
 
+    def _tl_citas_de(man):
+        """Citas pactadas de cargue/descargue leyendo la remesa del manifiesto."""
+        try:
+            okr, rems = consultar_remesas_por_manifiesto(man, _perfil_corregir(perfil))
+        except Exception:
+            okr, rems = False, []
+        if okr and rems:
+            _r = {str(k).lower(): v for k, v in rems[0].items()}
+            return {
+                "f_carg": _r.get("fechacitapactadacargue", ""),
+                "h_carg": _r.get("horacitapactadacargue", ""),
+                "f_desc": _r.get("fechacitapactadadescargue", ""),
+                "h_desc": _r.get("horacitapactadadescargueremesa", ""),
+            }
+        return {}
+
     if b1.button("🔍 Consultar tiempos", type="primary", key="tl_btn"):
-        man = st.session_state.get("tl_in", "").strip()
+        mans = [t for t in re.split(r"[\s,;]+", st.session_state.get("tl_in", "").strip()) if t]
+        vistos, lista = set(), []
+        for m in mans:
+            if m not in vistos:
+                vistos.add(m); lista.append(m)
         placa = st.session_state.get("tl_placa", "").strip()
-        if not man and not placa:
-            st.warning("Escribe el N° de manifiesto o la placa.")
+        if not lista and not placa:
+            st.warning("Escribe al menos un N° de manifiesto o la placa.")
         elif not perfil.get("nit_monitoreo"):
             st.error("Este perfil no tiene configurada la empresa de monitoreo "
-                     "(nit_monitoreo). Por ahora solo está disponible para UT Elogia.")
+                     "(nit_monitoreo).")
         else:
-            radicado = ""
-            fallo = False
-            # Si hay N° de manifiesto, se deriva su radicado (ingresoid)
-            if man:
-                with st.spinner(f"Buscando radicado del manifiesto {man}…"):
-                    okm, resm = consultar_manifiesto_completo(man, _perfil_corregir(perfil), procesoid=4)
-                if okm and isinstance(resm, dict):
-                    radicado = _cmf_get(resm, "ingresoidmanifiesto") or _cmf_get(resm, "ingresoid")
-                if not radicado:
-                    st.session_state.pop("tl_docs", None)
-                    st.error(f"No se encontró el radicado del manifiesto {man}. "
-                             f"Detalle: {resm if not okm else 'sin radicado en la respuesta'}")
-                    fallo = True
-            if not fallo:
-                # Consultar el monitoreo (proceso 60) por radicado y/o placa
+            resultados = []
+            if lista:
+                prog = st.progress(0.0, text="Consultando…")
+                for i, man in enumerate(lista, 1):
+                    item = {"man": man, "radicado": "", "docs": [], "citas": {}, "error": ""}
+                    # 1) Radicado del manifiesto (ingresoid)
+                    try:
+                        okm, resm = consultar_manifiesto_completo(man, _perfil_corregir(perfil), procesoid=4)
+                    except Exception as e:
+                        okm, resm = False, str(e)
+                    radicado = ""
+                    if okm and isinstance(resm, dict):
+                        radicado = _cmf_get(resm, "ingresoidmanifiesto") or _cmf_get(resm, "ingresoid")
+                    if not radicado:
+                        item["error"] = ("No se encontró el radicado"
+                                         + (f": {resm}" if not okm else ""))
+                    else:
+                        item["radicado"] = radicado
+                        # 2) Monitoreo (proceso 60) por radicado (y placa si se indicó)
+                        ok, docs = consultar_monitoreo_manifiesto(
+                            _perfil_monitoreo(perfil), radicado_manifiesto=radicado, placa=placa)
+                        if ok:
+                            item["docs"] = docs
+                            item["citas"] = _tl_citas_de(man)
+                        else:
+                            item["error"] = str(docs)
+                    resultados.append(item)
+                    prog.progress(i / len(lista), text=f"{i}/{len(lista)}")
+                prog.empty()
+            else:
+                # Solo placa (sin manifiestos)
+                item = {"man": "", "radicado": "", "docs": [], "citas": {}, "error": ""}
                 with st.spinner("Consultando tiempos de monitoreo…"):
-                    ok, docs = consultar_monitoreo_manifiesto(
-                        _perfil_monitoreo(perfil), radicado_manifiesto=radicado, placa=placa)
+                    ok, docs = consultar_monitoreo_manifiesto(_perfil_monitoreo(perfil), placa=placa)
                 if ok:
-                    st.session_state["tl_docs"] = docs
-                    st.session_state["tl_man"] = man
-                    st.session_state["tl_radicado"] = radicado
-                    st.session_state["tl_placa_res"] = placa
-                    # Citas pactadas (cargue/descargue) desde la remesa del manifiesto
-                    citas = {}
-                    _man_citas = man or ""
-                    if not _man_citas:
-                        # Sin N° de manifiesto (búsqueda por placa) → tomarlo del monitoreo si viene
-                        for d in docs:
-                            _low = {str(k).lower(): v for k, v in d.items()}
-                            if _low.get("nummanifiestocarga"):
-                                _man_citas = _low["nummanifiestocarga"]
-                                break
-                    if _man_citas:
-                        okr, rems = consultar_remesas_por_manifiesto(_man_citas, _perfil_corregir(perfil))
-                        if okr and rems:
-                            _r = {str(k).lower(): v for k, v in rems[0].items()}
-                            citas = {
-                                "f_carg": _r.get("fechacitapactadacargue", ""),
-                                "h_carg": _r.get("horacitapactadacargue", ""),
-                                "f_desc": _r.get("fechacitapactadadescargue", ""),
-                                "h_desc": _r.get("horacitapactadadescargueremesa", ""),
-                            }
-                    st.session_state["tl_citas"] = citas
+                    item["docs"] = docs
+                    for d in docs:
+                        _low = {str(k).lower(): v for k, v in d.items()}
+                        if _low.get("nummanifiestocarga"):
+                            item["man"] = _low["nummanifiestocarga"]
+                            break
+                    if item["man"]:
+                        item["citas"] = _tl_citas_de(item["man"])
                 else:
-                    st.session_state.pop("tl_docs", None)
-                    st.error(f"✗ {docs}")
+                    item["error"] = str(docs)
+                resultados.append(item)
+            st.session_state["tl_res"] = resultados
+            st.session_state["tl_placa_res"] = placa
 
-    docs = st.session_state.get("tl_docs")
-    if not docs:
+    res_list = st.session_state.get("tl_res")
+    if not res_list:
         return
-    man = st.session_state.get("tl_man", "")
-    radicado = st.session_state.get("tl_radicado", "")
     placa = st.session_state.get("tl_placa_res", "")
-    filtro_txt = " · ".join(
-        [t for t in (f"Manifiesto {man}" if man else "",
-                     f"Radicado {radicado}" if radicado else "",
-                     f"Placa {placa}" if placa else "") if t])
-    st.success(f"{filtro_txt} · {len(docs)} punto(s) de control.")
-
-    # ── Tiempos origen (punto 1 = cargue) y destino (último punto = descargue) ──
-    citas = st.session_state.get("tl_citas", {}) or {}
+    con_datos = [r for r in res_list if r["docs"]]
+    fallidos = [r for r in res_list if r["error"]]
+    st.success(f"{len(res_list)} consulta(s) · {len(con_datos)} con monitoreo"
+               + (f" · Placa {placa}" if placa else ""))
+    for r in fallidos:
+        st.error(f"✗ {r['man'] or placa}: {r['error']}")
 
     def _pc_num(d):
         try:
@@ -1136,81 +1154,103 @@ def modulo_consultar_tiempos(perfil):
         except Exception:
             return 0
 
-    docs_orden = sorted(docs, key=_pc_num)
-    # Origen = punto de control 1; destino = el último punto > 1 (si existe).
-    origen = next((d for d in docs_orden if _pc_num(d) == 1), None)
-    destino = next((d for d in reversed(docs_orden) if _pc_num(d) > 1), None)
-
-    def _ficha(d, f_cita, h_cita):
-        low = {str(k).lower(): v for k, v in d.items()} if d else {}
-        return pd.DataFrame([
-            {"Campo": "Fecha cita pactada", "Valor": f_cita or "—"},
-            {"Campo": "Hora cita pactada",  "Valor": h_cita or "—"},
-            {"Campo": "Fecha llegada",      "Valor": low.get("fechallegada", "") or "—"},
-            {"Campo": "Hora llegada",       "Valor": low.get("horallegada", "") or "—"},
-            {"Campo": "Fecha salida",       "Valor": low.get("fechasalida", "") or "—"},
-            {"Campo": "Hora salida",        "Valor": low.get("horasalida", "") or "—"},
-            {"Campo": "Minutos en punto",   "Valor": low.get("minutos", "") or "—"},
-        ])
-
-    co, cd = st.columns(2)
-    with co:
-        st.markdown("**🚚 Tiempos origen (cargue)**")
-        if origen is not None:
-            st.dataframe(_ficha(origen, citas.get("f_carg", ""), citas.get("h_carg", "")),
-                         use_container_width=True, hide_index=True)
+    def _origen_destino(docs_orden):
+        """Origen = punto 1; destino = último punto > 1; estado global del monitoreo."""
+        origen = next((d for d in docs_orden if _pc_num(d) == 1), None)
+        destino = next((d for d in reversed(docs_orden) if _pc_num(d) > 1), None)
+        if origen is not None and destino is not None:
+            e = "Completo (origen y destino)"
+        elif origen is not None:
+            e = "Solo origen (sin registro en destino)"
+        elif destino is not None:
+            e = "Solo destino (sin registro en origen)"
         else:
-            st.info("No hay registro de monitoreo en el origen.")
-    with cd:
-        st.markdown("**🏁 Tiempos destino (descargue)**")
-        if destino is not None:
-            st.dataframe(_ficha(destino, citas.get("f_desc", ""), citas.get("h_desc", "")),
-                         use_container_width=True, hide_index=True)
-        else:
-            st.info("Solo se ha reportado el origen; aún no hay registro en el destino.")
+            e = "Sin puntos de control"
+        return origen, destino, e
 
-    # Estado global del monitoreo (se refleja en la tabla y en el CSV)
-    if origen is not None and destino is not None:
-        estado_mon = "Completo (origen y destino)"
-    elif origen is not None:
-        estado_mon = "Solo origen (sin registro en destino)"
-    elif destino is not None:
-        estado_mon = "Solo destino (sin registro en origen)"
-    else:
-        estado_mon = "Sin puntos de control"
+    # ── Vista detallada (fichas origen/destino) cuando es UN solo manifiesto ──
+    if len(res_list) == 1 and con_datos:
+        r = res_list[0]
+        citas = r["citas"] or {}
+        docs_orden = sorted(r["docs"], key=_pc_num)
+        origen, destino, _e = _origen_destino(docs_orden)
 
-    # Tabla completa (una fila por punto de control)
+        def _ficha(d, f_cita, h_cita):
+            low = {str(k).lower(): v for k, v in d.items()} if d else {}
+            return pd.DataFrame([
+                {"Campo": "Fecha cita pactada", "Valor": f_cita or "—"},
+                {"Campo": "Hora cita pactada",  "Valor": h_cita or "—"},
+                {"Campo": "Fecha llegada",      "Valor": low.get("fechallegada", "") or "—"},
+                {"Campo": "Hora llegada",       "Valor": low.get("horallegada", "") or "—"},
+                {"Campo": "Fecha salida",       "Valor": low.get("fechasalida", "") or "—"},
+                {"Campo": "Hora salida",        "Valor": low.get("horasalida", "") or "—"},
+                {"Campo": "Minutos en punto",   "Valor": low.get("minutos", "") or "—"},
+            ])
+
+        co, cd = st.columns(2)
+        with co:
+            st.markdown("**🚚 Tiempos origen (cargue)**")
+            if origen is not None:
+                st.dataframe(_ficha(origen, citas.get("f_carg", ""), citas.get("h_carg", "")),
+                             use_container_width=True, hide_index=True)
+            else:
+                st.info("No hay registro de monitoreo en el origen.")
+        with cd:
+            st.markdown("**🏁 Tiempos destino (descargue)**")
+            if destino is not None:
+                st.dataframe(_ficha(destino, citas.get("f_desc", ""), citas.get("h_desc", "")),
+                             use_container_width=True, hide_index=True)
+            else:
+                st.info("Solo se ha reportado el origen; aún no hay registro en el destino.")
+
+    # ── Tabla combinada (todos los manifiestos, una fila por punto de control) ──
     st.markdown("**📑 Todos los puntos de control**")
     filas = []
-    for d in docs_orden:
-        low = {str(k).lower(): v for k, v in d.items()}
-        pc = _pc_num(d)
-        if pc == 1:
-            tipo_punto, f_cita, h_cita = "Origen (cargue)", citas.get("f_carg", ""), citas.get("h_carg", "")
-        elif d is destino:
-            tipo_punto, f_cita, h_cita = "Destino (descargue)", citas.get("f_desc", ""), citas.get("h_desc", "")
-        else:
-            tipo_punto, f_cita, h_cita = "Intermedio", "", ""
-        fila = {"Punto": tipo_punto}
-        fila.update({etq: low.get(var, "") for etq, var in _MONITOREO_CAMPOS})
-        fila["Fecha cita pactada"] = f_cita
-        fila["Hora cita pactada"] = h_cita
-        fila["Estado monitoreo"] = estado_mon
-        filas.append(fila)
-    cols = (["Punto"] + [etq for etq, _ in _MONITOREO_CAMPOS]
+    for r in res_list:
+        citas = r["citas"] or {}
+        docs_orden = sorted(r["docs"], key=_pc_num)
+        origen, destino, estado_mon = _origen_destino(docs_orden)
+        if r["error"]:
+            fila = {"Manifiesto": r["man"] or placa, "Radicado": r["radicado"], "Punto": ""}
+            fila.update({etq: "" for etq, _ in _MONITOREO_CAMPOS})
+            fila["Fecha cita pactada"] = ""
+            fila["Hora cita pactada"] = ""
+            fila["Estado monitoreo"] = f"Sin monitoreo ({r['error'][:80]})"
+            filas.append(fila)
+            continue
+        for d in docs_orden:
+            low = {str(k).lower(): v for k, v in d.items()}
+            pc = _pc_num(d)
+            if pc == 1:
+                tipo_punto, f_cita, h_cita = "Origen (cargue)", citas.get("f_carg", ""), citas.get("h_carg", "")
+            elif d is destino:
+                tipo_punto, f_cita, h_cita = "Destino (descargue)", citas.get("f_desc", ""), citas.get("h_desc", "")
+            else:
+                tipo_punto, f_cita, h_cita = "Intermedio", "", ""
+            fila = {"Manifiesto": r["man"], "Radicado": r["radicado"], "Punto": tipo_punto}
+            fila.update({etq: low.get(var, "") for etq, var in _MONITOREO_CAMPOS})
+            fila["Fecha cita pactada"] = f_cita
+            fila["Hora cita pactada"] = h_cita
+            fila["Estado monitoreo"] = estado_mon
+            filas.append(fila)
+    cols = (["Manifiesto", "Radicado", "Punto"] + [etq for etq, _ in _MONITOREO_CAMPOS]
             + ["Fecha cita pactada", "Hora cita pactada", "Estado monitoreo"])
     df = pd.DataFrame(filas, columns=cols)
     st.dataframe(df, use_container_width=True, hide_index=True)
     _copiar_tabla(df, "cp_tl")
     st.download_button("⬇️ Descargar (.csv)", df.to_csv(index=False).encode("utf-8-sig"),
-                       file_name=f"tiempos_{man or radicado or placa}.csv", mime="text/csv", key="tl_dl")
+                       file_name="tiempos_logisticos.csv", mime="text/csv", key="tl_dl")
 
     # Variables crudas (avanzado)
     with st.expander("🔧 Ver todas las variables crudas del RNDC (avanzado)"):
-        for i, d in enumerate(docs, 1):
-            st.markdown(f"**Punto de control #{i}**")
-            st.dataframe(pd.DataFrame([{"Variable": k, "Valor": v} for k, v in d.items()]),
-                         use_container_width=True, hide_index=True)
+        for r in res_list:
+            if not r["docs"]:
+                continue
+            st.markdown(f"**Manifiesto {r['man'] or placa or '—'} · Radicado {r['radicado'] or '—'}**")
+            for i, d in enumerate(r["docs"], 1):
+                st.markdown(f"Punto de control #{i}")
+                st.dataframe(pd.DataFrame([{"Variable": k, "Valor": v} for k, v in d.items()]),
+                             use_container_width=True, hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
