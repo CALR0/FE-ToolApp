@@ -1169,13 +1169,37 @@ def modulo_consultar_tiempos(perfil):
         else:
             st.info("Solo se ha reportado el origen; aún no hay registro en el destino.")
 
+    # Estado global del monitoreo (se refleja en la tabla y en el CSV)
+    if origen is not None and destino is not None:
+        estado_mon = "Completo (origen y destino)"
+    elif origen is not None:
+        estado_mon = "Solo origen (sin registro en destino)"
+    elif destino is not None:
+        estado_mon = "Solo destino (sin registro en origen)"
+    else:
+        estado_mon = "Sin puntos de control"
+
     # Tabla completa (una fila por punto de control)
     st.markdown("**📑 Todos los puntos de control**")
     filas = []
     for d in docs_orden:
         low = {str(k).lower(): v for k, v in d.items()}
-        filas.append({etq: low.get(var, "") for etq, var in _MONITOREO_CAMPOS})
-    df = pd.DataFrame(filas, columns=[etq for etq, _ in _MONITOREO_CAMPOS])
+        pc = _pc_num(d)
+        if pc == 1:
+            tipo_punto, f_cita, h_cita = "Origen (cargue)", citas.get("f_carg", ""), citas.get("h_carg", "")
+        elif d is destino:
+            tipo_punto, f_cita, h_cita = "Destino (descargue)", citas.get("f_desc", ""), citas.get("h_desc", "")
+        else:
+            tipo_punto, f_cita, h_cita = "Intermedio", "", ""
+        fila = {"Punto": tipo_punto}
+        fila.update({etq: low.get(var, "") for etq, var in _MONITOREO_CAMPOS})
+        fila["Fecha cita pactada"] = f_cita
+        fila["Hora cita pactada"] = h_cita
+        fila["Estado monitoreo"] = estado_mon
+        filas.append(fila)
+    cols = (["Punto"] + [etq for etq, _ in _MONITOREO_CAMPOS]
+            + ["Fecha cita pactada", "Hora cita pactada", "Estado monitoreo"])
+    df = pd.DataFrame(filas, columns=cols)
     st.dataframe(df, use_container_width=True, hide_index=True)
     _copiar_tabla(df, "cp_tl")
     st.download_button("⬇️ Descargar (.csv)", df.to_csv(index=False).encode("utf-8-sig"),
