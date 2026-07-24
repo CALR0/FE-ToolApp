@@ -483,6 +483,135 @@ def consultar_manifiesto_completo(num_manifiesto, perfil, procesoid=4, timeout=2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CONSULTA DE FACTURA ELECTRÓNICA — proceso 86, tipo 3, variables=* (todos los campos)
+# Filtra por NUMNITEMPRESATRANSPORTE (nit_socio) + NUMEROFACTURA. NO sube ningún XML:
+# solo lee el estado y los datos de una factura YA cargada.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RNDC_CONSULTA_FACTURA_TMPL = """<?xml version='1.0' encoding='ISO-8859-1' ?>
+<root>
+  <acceso>
+    <username>{usuario}</username>
+    <password>{password}</password>
+  </acceso>
+  <solicitud>
+    <tipo>3</tipo>
+    <procesoid>86</procesoid>
+  </solicitud>
+  <variables>*</variables>
+  <documento>
+    <NUMNITEMPRESATRANSPORTE>'{nit_empresa}'</NUMNITEMPRESATRANSPORTE>
+    <NUMEROFACTURA>'{num_factura}'</NUMEROFACTURA>
+  </documento>
+</root>"""
+
+
+def consultar_factura(num_factura, perfil, timeout=20):
+    """
+    Consulta una factura electrónica YA cargada al RNDC (proceso 86, tipo=3,
+    variables=*), filtrando por NUMEROFACTURA. NO envía ningún XML: solo lee el
+    estado y los datos de la factura.
+
+    Usa las credenciales NORMALES del perfil (rndc_usuario / rndc_password) y
+    nit_socio como NUMNITEMPRESATRANSPORTE — funciona igual para ut_tsp y ut_elogia.
+
+    Parámetros:
+        num_factura : str  — número de la factura a consultar.
+        perfil      : dict — perfil activo (usa rndc_usuario/password/nit_socio).
+        timeout     : int  — segundos de espera.
+
+    Retorna:
+        (ok: bool, resultado)
+        Si ok=True  → dict {tag: valor} con TODOS los campos del <documento>
+                      (estado, cufe, subtotal, valorfletes, nitadquirente, etc.).
+        Si ok=False → str con el mensaje de error.
+    """
+    if not REQUESTS_OK:
+        return False, "La librería 'requests' no está instalada."
+
+    import html as _html, xml.etree.ElementTree as ET, re as _re
+
+    usuario     = perfil.get("rndc_usuario", "")
+    password    = perfil.get("rndc_password", "")
+    nit_empresa = perfil.get("nit_socio", "")
+
+    rndc_xml = _RNDC_CONSULTA_FACTURA_TMPL.format(
+        usuario=_html.escape(usuario),
+        password=_html.escape(password),
+        nit_empresa=_html.escape(nit_empresa),
+        num_factura=_html.escape(str(num_factura).strip()),
+    )
+    soap_body = _RNDC_CONSULTA_SOAP_ENVELOPE.format(
+        rndc_xml_escaped=_html.escape(rndc_xml)
+    )
+
+    url     = _RNDC_CONSULTA_ENDPOINT + _RNDC_CONSULTA_SOAP_PATH
+    headers = {
+        "Content-Type": "text/xml; charset=UTF-8",
+        "SOAPAction":   _RNDC_CONSULTA_ACTION,
+    }
+
+    try:
+        resp = _requests.post(url, data=soap_body.encode("utf-8"),
+                              headers=headers, timeout=timeout)
+    except _requests.exceptions.ConnectionError:
+        return False, f"Sin conexión a {_RNDC_CONSULTA_ENDPOINT}"
+    except _requests.exceptions.Timeout:
+        return False, f"Tiempo de espera agotado ({timeout}s)"
+    except Exception as e:
+        return False, str(e)[:180]
+
+    inner_raw = None
+    m = _re.search(r'<[^>]*:?return[^>]*>(.*?)</[^>]*:?return>',
+                   resp.text, _re.DOTALL | _re.IGNORECASE)
+    if m:
+        inner_raw = m.group(1).strip()
+    if not inner_raw:
+        m2 = _re.search(r'(<root[^>]*>.*?</root>)', resp.text,
+                        _re.DOTALL | _re.IGNORECASE)
+        if m2:
+            inner_raw = m2.group(1).strip()
+    if not inner_raw:
+        return False, f"Respuesta no reconocida: {resp.text.strip()[:200]}"
+
+    inner = _html.unescape(inner_raw)
+
+    def _parse(texto):
+        for intento in (texto, texto.encode("iso-8859-1", errors="ignore"),
+                        _re.sub(r'<\?xml[^?]*\?>', '', texto, count=1).strip()):
+            try:
+                return ET.fromstring(intento)
+            except Exception:
+                continue
+        return None
+
+    root_el = _parse(inner)
+    if root_el is None:
+        campos = _campos_documento_regex(inner)
+        if campos:
+            return True, campos
+        return False, f"No se pudo parsear la respuesta: {inner[:200]}"
+
+    for tag in (".//ErrorMSG", ".//error"):
+        el = root_el.find(tag)
+        if el is not None and el.text and el.text.strip():
+            return False, el.text.strip()
+
+    doc_el = root_el.find(".//documento")
+    if doc_el is None:
+        campos = _campos_documento_regex(inner)
+        if campos:
+            return True, campos
+        return False, (f"No se encontró la factura {num_factura} "
+                       f"(¿está cargada con ese número y este perfil?).")
+
+    campos = {child.tag: (child.text or "").strip() for child in doc_el}
+    if not campos:
+        return False, "El <documento> no trajo campos."
+    return True, campos
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MONITOREO DE MANIFIESTO (tiempos logísticos) — RNDC proceso 60 (tipo 3 = consulta)
 # ─────────────────────────────────────────────────────────────────────────────
 

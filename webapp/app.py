@@ -38,6 +38,7 @@ from services.rndc_service import (
     anular_cumplido_remesa, anular_cumplido_manifiesto, corregir_remesa,
     cumplir_remesa, consultar_manifiesto_completo, cumplir_manifiesto,
     consultar_monitoreo_manifiesto, consultar_remesas_por_manifiesto,
+    consultar_factura,
 )
 
 from webapp import lib_excel
@@ -842,6 +843,144 @@ def modulo_consultar_manifiesto(perfil):
                     st.markdown(f"**Manifiesto {man}**")
                     st.dataframe(pd.DataFrame([{"Variable": k, "Valor": v} for k, v in res.items()]),
                                  use_container_width=True, hide_index=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MÓDULO: Consultar factura (proceso 86, tipo=3 — consulta sin subir XML)
+# ─────────────────────────────────────────────────────────────────────────────
+# Campos importantes de la factura (etiqueta amigable → nombres candidatos del RNDC).
+_FACT_CAMPOS = [
+    ("N° Factura",     ["NUMEROFACTURA"]),
+    ("Estado",         ["ESTADO"]),
+    ("Tipo documento", ["TIPODOCUMENTO"]),
+    ("N° Radicado",    ["INGRESOID"]),
+    ("Fecha creación", ["FECHACREA"]),
+    ("Fecha factura",  ["FECHAFACTURA"]),
+    ("Hora factura",   ["HORAFACTURA"]),
+    ("Aprobado",       ["APROBADO"]),
+    ("NIT mandatario", ["NUMERONITMANDATARIO"]),
+    ("CUFE",           ["CUFE"]),
+    ("Tipo operación", ["TIPOOPERACION"]),
+    ("Valor fletes",   ["VALORFLETES"]),
+    ("Subtotal",       ["SUBTOTAL"]),
+    ("NIT facturador", ["NITFACTURADOR"]),
+    ("NIT adquirente", ["NITADQUIRENTE"]),
+    ("Líneas factura", ["LINEASFACTURA"]),
+    ("Remesas",        ["REMESAS"]),
+    ("Kilogramos",     ["KILOGRAMOS"]),
+]
+
+
+def _estado_factura_txt(cod):
+    """CE = cumplida/aprobada electrónicamente; AC = no aprobada (rechazada)."""
+    cod = str(cod).strip().upper()
+    if cod == "CE":
+        return "Cumplida electrónicamente (CE)"
+    if cod == "AC":
+        return "No aprobada / rechazada (AC)"
+    return cod or "—"
+
+
+def _fact_limpio(v):
+    """El RNDC usa '.' como marcador de vacío en algunos campos (aprobado,
+    numeronitmandatario). Se muestra como vacío."""
+    v = str(v).strip()
+    return "" if v == "." else v
+
+
+def _fact_curado(num, res):
+    """Extrae solo los campos importantes (nombres amigables) del dict completo.
+    Prueba cada nombre candidato y usa el primero presente (case-insensitive)."""
+    upper = {str(k).upper(): v for k, v in res.items()}
+    fila = {"N° Factura consultada": num}
+    for label, cands in _FACT_CAMPOS:
+        val = ""
+        for c in cands:
+            if c in upper and str(upper[c]).strip():
+                val = upper[c]
+                break
+        fila[label] = _estado_factura_txt(val) if label == "Estado" else _fact_limpio(val)
+    return fila
+
+
+def modulo_consultar_factura(perfil):
+    st.header("🧾 Consultar Factura")
+    st.caption("Consulta una factura ya cargada al RNDC por su número (proceso 86), "
+               "sin subir el XML. Funciona para ut_tsp y ut_elogia.")
+
+    def _cf_limpiar():
+        st.session_state["cf2_txt"] = ""
+        st.session_state.pop("cf2_result", None)
+        st.session_state.pop("cf2_full", None)
+
+    st.text_area("N° Factura(s) a consultar (coma, espacio o salto de línea)",
+                 height=100, key="cf2_txt")
+    b1, b2 = st.columns([1, 1])
+    b2.button("🗑 Limpiar módulo", key="cf2_clear", on_click=_cf_limpiar)
+    if b1.button("🔍 Consultar", type="primary", key="cf2_btn"):
+        facturas = [t for t in re.split(r"[\s,;]+", st.session_state.get("cf2_txt", "").strip()) if t]
+        vistos, lista = set(), []
+        for f in facturas:
+            if f not in vistos:
+                vistos.add(f)
+                lista.append(f)
+        if not lista:
+            st.warning("Escribe al menos un N° de factura.")
+        else:
+            prog = st.progress(0.0, text="Consultando…")
+            curados, full = [], {}
+            for i, num in enumerate(lista, 1):
+                try:
+                    ok, res = consultar_factura(num, perfil)   # credenciales normales del perfil
+                except Exception as e:
+                    ok, res = False, str(e)
+                if ok:
+                    fila = _fact_curado(num, res)
+                    fila["Consulta"] = "✓ Encontrada"
+                    full[num] = res             # guardar el completo para vista avanzada
+                else:
+                    fila = {"N° Factura consultada": num}
+                    for label, _ in _FACT_CAMPOS:
+                        fila[label] = ""
+                    fila["Consulta"] = f"✗ {res}"
+                curados.append(fila)
+                prog.progress(i / len(lista), text=f"{i}/{len(lista)}")
+            prog.empty()
+            st.session_state["cf2_result"] = curados
+            st.session_state["cf2_full"] = full
+
+    curados = st.session_state.get("cf2_result")
+    if not curados:
+        return
+    encontradas = [r for r in curados if r.get("Consulta", "").startswith("✓")]
+    st.success(f"{len(curados)} factura(s) consultada(s) · {len(encontradas)} encontrada(s).")
+
+    # Ficha detallada del único resultado (si hay uno solo encontrado).
+    if len(encontradas) == 1:
+        f = encontradas[0]
+        st.subheader("📋 Datos de la factura")
+        _df_ficha = pd.DataFrame([{"Campo": k, "Valor": v} for k, v in f.items() if k != "Consulta"])
+        st.dataframe(_df_ficha, use_container_width=True, hide_index=True)
+        _copiar_tabla(_df_ficha, "cp_cf2_ficha")
+
+    # Tabla de todas las consultadas (una fila por factura).
+    st.subheader("📑 Facturas consultadas")
+    cols = ["N° Factura consultada"] + [lbl for lbl, _ in _FACT_CAMPOS] + ["Consulta"]
+    df = pd.DataFrame(curados, columns=cols)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    _copiar_tabla(df, "cp_cf2_tabla")
+    st.download_button("⬇️ Descargar resultados (.csv)",
+                       df.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="consulta_facturas.csv", mime="text/csv", key="cf2_dl")
+
+    # Vista avanzada (colapsada): TODAS las variables crudas del RNDC.
+    full = st.session_state.get("cf2_full") or {}
+    if full:
+        with st.expander("🔧 Ver todas las variables crudas del RNDC (avanzado)"):
+            for num, res in full.items():
+                st.markdown(f"**Factura {num}**")
+                st.dataframe(pd.DataFrame([{"Variable": k, "Valor": v} for k, v in res.items()]),
+                             use_container_width=True, hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2181,6 +2320,7 @@ def _grupos(perfil):
             "Generar XML": modulo_generar_xml,
             "Generar facturas vía Excel": modulo_generar_excel,
             "Cargar facturas a RNDC": modulo_cargar_rndc,
+            "Consultar factura": modulo_consultar_factura,
         },
         "📋 Remesas": {
             "Consultar remesas": modulo_consultar_remesas,
