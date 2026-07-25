@@ -483,6 +483,54 @@ def consultar_manifiesto_completo(num_manifiesto, perfil, procesoid=4, timeout=2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CONSULTA DE MANIFIESTO POR RADICADO — proceso 4, tipo 3. Filtra por INGRESOID
+# (el radicado) en vez del número. Útil para el monitoreo por placa (proceso 60),
+# cuyos documentos traen `ingresoidmanifiesto` pero NO `nummanifiestocarga`.
+# Verificado: INGRESOID filtra; INGRESOIDMANIFIESTO/NUMRADICADO dan Error RNDC027.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RNDC_CONSULTA_MANIF_RADICADO_TMPL = """<?xml version='1.0' encoding='ISO-8859-1' ?>
+<root>
+  <acceso>
+    <username>{usuario}</username>
+    <password>{password}</password>
+  </acceso>
+  <solicitud>
+    <tipo>3</tipo>
+    <procesoid>4</procesoid>
+  </solicitud>
+  <variables>*</variables>
+  <documento>
+    <NUMNITEMPRESATRANSPORTE>'{nit_empresa}'</NUMNITEMPRESATRANSPORTE>
+    <INGRESOID>'{radicado}'</INGRESOID>
+  </documento>
+</root>"""
+
+
+def consultar_manifiesto_por_radicado(radicado, perfil, timeout=20):
+    """
+    Consulta un manifiesto (proceso 4, tipo=3, variables=*) por su RADICADO
+    (INGRESOID) en vez de por su número. Retorna (ok, dict) con todos los campos
+    del manifiesto — incluido `nummanifiestocarga` — o (False, error).
+    """
+    if not REQUESTS_OK:
+        return False, "La librería 'requests' no está instalada."
+    import html as _html
+    rndc_xml = _RNDC_CONSULTA_MANIF_RADICADO_TMPL.format(
+        usuario=_html.escape(perfil.get("rndc_usuario", "")),
+        password=_html.escape(perfil.get("rndc_password", "")),
+        nit_empresa=_html.escape(perfil.get("nit_socio", "")),
+        radicado=_html.escape(str(radicado).strip()),
+    )
+    ok, docs = _post_consulta_multi(rndc_xml, timeout)
+    if not ok:
+        return False, docs
+    if not docs:
+        return False, "Manifiesto no encontrado por radicado."
+    return True, docs[0]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CONSULTA DE FACTURA ELECTRÓNICA — proceso 86, tipo 3, variables=* (todos los campos)
 # Filtra por NUMNITEMPRESATRANSPORTE (nit_socio) + NUMEROFACTURA. NO sube ningún XML:
 # solo lee el estado y los datos de una factura YA cargada.
@@ -612,6 +660,99 @@ def consultar_factura(num_factura, perfil, timeout=20):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CONSULTA DE FACTURAS POR RANGO DE FECHA — proceso 86, tipo 3.
+# El WS NO soporta rango nativo: solo filtra por FECHAFACTURA EXACTA (YYYY-MM-DD) y
+# devuelve TODAS las facturas de ese día. Por eso el rango se hace consultando
+# día por día y agregando (verificado empíricamente: operadores >=/<=/BETWEEN y los
+# campos FECHAINICIAL*/FECHAFINAL* dan Error RNDC027).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RNDC_CONSULTA_FACTURA_FECHA_TMPL = """<?xml version='1.0' encoding='ISO-8859-1' ?>
+<root>
+  <acceso>
+    <username>{usuario}</username>
+    <password>{password}</password>
+  </acceso>
+  <solicitud>
+    <tipo>3</tipo>
+    <procesoid>86</procesoid>
+  </solicitud>
+  <variables>*</variables>
+  <documento>
+    <NUMNITEMPRESATRANSPORTE>'{nit_empresa}'</NUMNITEMPRESATRANSPORTE>
+    <FECHAFACTURA>'{fecha}'</FECHAFACTURA>
+  </documento>
+</root>"""
+
+
+def consultar_facturas_por_fecha(perfil, fecha_inicial, fecha_final,
+                                 timeout=20, max_dias=93):
+    """
+    Lista las facturas electrónicas (proceso 86, tipo=3) cuya FECHAFACTURA cae en
+    el rango [fecha_inicial, fecha_final] (inclusive). Como el WS solo filtra por
+    fecha EXACTA, se consulta día por día y se agregan los resultados.
+
+    fecha_inicial/fecha_final: date o str ('YYYY-MM-DD', 'YYYY/MM/DD', 'DD/MM/YYYY').
+    max_dias: tope de días del rango (evita rangos gigantes).
+
+    Retorna:
+        (ok: bool, resultado)
+        Si ok=True  → list[dict], un dict por factura (todos los campos del RNDC).
+        Si ok=False → str con el mensaje de error.
+    """
+    if not REQUESTS_OK:
+        return False, "La librería 'requests' no está instalada."
+
+    import html as _html
+    from datetime import datetime as _dt, timedelta as _td
+
+    def _to_date(x):
+        if x is None:
+            return None
+        if hasattr(x, "strftime") and not isinstance(x, str):
+            return x
+        s = str(x).strip()
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                return _dt.strptime(s, fmt).date()
+            except Exception:
+                continue
+        return None
+
+    d0, d1 = _to_date(fecha_inicial), _to_date(fecha_final)
+    if not d0 or not d1:
+        return False, "Fechas inválidas (usa AAAA-MM-DD)."
+    if d1 < d0:
+        d0, d1 = d1, d0
+    dias = (d1 - d0).days + 1
+    if dias > max_dias:
+        return False, (f"El rango es de {dias} días; el máximo es {max_dias}. "
+                       f"Acorta el rango de fechas.")
+
+    usuario  = perfil.get("rndc_usuario", "")
+    password = perfil.get("rndc_password", "")
+    nit      = perfil.get("nit_socio", "")
+
+    todos, errores = [], []
+    d = d0
+    while d <= d1:
+        fecha = d.strftime("%Y-%m-%d")
+        rndc_xml = _RNDC_CONSULTA_FACTURA_FECHA_TMPL.format(
+            usuario=_html.escape(usuario), password=_html.escape(password),
+            nit_empresa=_html.escape(nit), fecha=fecha)
+        ok, docs = _post_consulta_multi(rndc_xml, timeout)
+        if ok:
+            todos.extend(docs)          # (True, []) si ese día no tiene facturas
+        else:
+            errores.append(f"{fecha}: {docs}")
+        d += _td(days=1)
+
+    if not todos and errores:
+        return False, "; ".join(errores[:3])
+    return True, todos
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MONITOREO DE MANIFIESTO (tiempos logísticos) — RNDC proceso 60 (tipo 3 = consulta)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -686,11 +827,20 @@ _RNDC_MONITOREO_TMPL = """<?xml version='1.0' encoding='ISO-8859-1' ?>
 </root>"""
 
 
-def consultar_monitoreo_manifiesto(perfil, radicado_manifiesto="", placa="", timeout=20):
+def consultar_monitoreo_manifiesto(perfil, radicado_manifiesto="", placa="",
+                                   fecha_inicial="", fecha_final="", timeout=20,
+                                   max_dias=93):
     """
     Consulta los tiempos logísticos (monitoreo) de un manifiesto — proceso 60,
     tipo=3, variables=*. Filtra por radicado del manifiesto (INGRESOIDMANIFIESTO)
     y/o por placa del vehículo (NUMPLACA). Debe pasarse al menos uno de los dos.
+
+    Rango de fecha OPCIONAL (fecha_inicial/fecha_final, date o str): útil sobre todo
+    al buscar por placa (una placa SIN fecha trae TODO su historial de monitoreo). El
+    WS no soporta rango nativo — solo filtra por FECHACREA EXACTA (YYYY-MM-DD) — así
+    que el rango se consulta día por día y se agrega (tope `max_dias`). Verificado:
+    FECHACREA/FECHALLEGADA/FECHASALIDA filtran en formato YYYY-MM-DD; DD/MM/YYYY y los
+    operadores >=/<= dan Error RNDC027, y un día sin datos da Error RNDC11 (= vacío).
 
     Devuelve TODOS los puntos de control (el RNDC entrega un <documento> por cada
     punto de control monitoreado).
@@ -725,20 +875,62 @@ def consultar_monitoreo_manifiesto(perfil, radicado_manifiesto="", placa="", tim
     if not radicado and not placa:
         return False, "Debes indicar el radicado del manifiesto o la placa del vehículo."
 
-    filtros = []
+    filtros_base = []
     if radicado:
-        filtros.append(f"    <INGRESOIDMANIFIESTO>'{_html.escape(radicado)}'</INGRESOIDMANIFIESTO>")
+        filtros_base.append(f"    <INGRESOIDMANIFIESTO>'{_html.escape(radicado)}'</INGRESOIDMANIFIESTO>")
     if placa:
-        filtros.append(f"    <NUMPLACA>'{_html.escape(placa)}'</NUMPLACA>")
+        filtros_base.append(f"    <NUMPLACA>'{_html.escape(placa)}'</NUMPLACA>")
 
-    rndc_xml = _RNDC_MONITOREO_TMPL.format(
-        usuario=_html.escape(usuario),
-        password=_html.escape(password),
-        nit_gps=_html.escape(str(nit_gps)),
-        nit_empresa=_html.escape(str(nit_emp)),
-        filtros="\n".join(filtros),
-    )
-    ok, docs = _post_consulta_multi(rndc_xml, timeout)
+    def _run(filtros):
+        rndc_xml = _RNDC_MONITOREO_TMPL.format(
+            usuario=_html.escape(usuario), password=_html.escape(password),
+            nit_gps=_html.escape(str(nit_gps)), nit_empresa=_html.escape(str(nit_emp)),
+            filtros="\n".join(filtros))
+        return _post_consulta_multi(rndc_xml, timeout)
+
+    # ── Rango de fecha opcional (día por día; el WS solo filtra FECHACREA exacta) ──
+    from datetime import datetime as _dt, timedelta as _td
+
+    def _to_date(x):
+        if not x:
+            return None
+        if hasattr(x, "strftime") and not isinstance(x, str):
+            return x
+        s = str(x).strip()
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                return _dt.strptime(s, fmt).date()
+            except Exception:
+                continue
+        return None
+
+    d0, d1 = _to_date(fecha_inicial), _to_date(fecha_final)
+    if d0 and d1:
+        if d1 < d0:
+            d0, d1 = d1, d0
+        dias = (d1 - d0).days + 1
+        if dias > max_dias:
+            return False, (f"El rango es de {dias} días; el máximo es {max_dias}. "
+                           f"Acorta el rango de fechas.")
+        todos, errores = [], []
+        d = d0
+        while d <= d1:
+            f = filtros_base + [f"    <FECHACREA>'{d.strftime('%Y-%m-%d')}'</FECHACREA>"]
+            ok, docs = _run(f)
+            if ok:
+                todos.extend(docs)
+            elif ("RNDC11" in str(docs)) or ("no encontrad" in str(docs).lower()):
+                pass                       # ese día no tiene monitoreo (normal)
+            else:
+                errores.append(f"{d.strftime('%Y-%m-%d')}: {docs}")
+            d += _td(days=1)
+        if not todos:
+            return False, ("; ".join(errores[:3]) if errores
+                           else "Sin datos de monitoreo en ese rango de fechas.")
+        return True, todos
+
+    # ── Sin rango: consulta única (comportamiento original) ──────────────────────
+    ok, docs = _run(filtros_base)
     if not ok:
         return False, docs
     if not docs:

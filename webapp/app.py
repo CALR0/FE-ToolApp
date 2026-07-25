@@ -38,7 +38,8 @@ from services.rndc_service import (
     anular_cumplido_remesa, anular_cumplido_manifiesto, corregir_remesa,
     cumplir_remesa, consultar_manifiesto_completo, cumplir_manifiesto,
     consultar_monitoreo_manifiesto, consultar_remesas_por_manifiesto,
-    consultar_factura,
+    consultar_factura, consultar_facturas_por_fecha,
+    consultar_manifiesto_por_radicado,
 )
 
 from webapp import lib_excel
@@ -903,18 +904,60 @@ def _fact_curado(num, res):
     return fila
 
 
+def _fact_card(label, value, accent=None, mono=False):
+    """Tarjeta con estilo para un campo de la factura (etiqueta + valor).
+    Colores en rgba/gris para que funcione en tema claro y oscuro. `accent` colorea
+    el valor (ej. verde/rojo para el estado); `mono` usa fuente monoespaciada (CUFE)."""
+    v = value if str(value).strip() else "—"
+    val_style = "font-size:16px;font-weight:600;line-height:1.35;word-break:break-word;"
+    if mono:
+        val_style += "font-family:ui-monospace,Consolas,monospace;font-size:13px;font-weight:500;"
+    if accent:
+        val_style += f"color:{accent};"
+    return (
+        "<div style=\"background:rgba(128,128,128,0.08);"
+        "border:1px solid rgba(128,128,128,0.22);border-radius:10px;"
+        "padding:10px 14px;margin-bottom:12px;min-height:64px;\">"
+        "<div style=\"font-size:11px;text-transform:uppercase;letter-spacing:.4px;"
+        f"color:#8a8a8a;font-weight:700;margin-bottom:5px;\">{label}</div>"
+        f"<div style=\"{val_style}\">{v}</div></div>"
+    )
+
+
+def _fact_accent(label, value):
+    """Verde si el estado es cumplido; rojo si no aprobado. None en el resto."""
+    if label != "Estado":
+        return None
+    v = str(value).lower()
+    if "cumplida" in v:
+        return "#1ea672"
+    if "no aprobada" in v or "rechaz" in v:
+        return "#e0574f"
+    return None
+
+
 def modulo_consultar_factura(perfil):
     st.header("🧾 Consultar Factura")
-    st.caption("Consulta una factura ya cargada al RNDC por su número (proceso 86), "
-               "sin subir el XML. Funciona para ut_tsp y ut_elogia.")
+    st.caption("Consulta una factura en el RNDC")
 
     def _cf_limpiar():
         st.session_state["cf2_txt"] = ""
+        st.session_state["cf2_usefecha"] = False
         st.session_state.pop("cf2_result", None)
         st.session_state.pop("cf2_full", None)
 
     st.text_area("N° Factura(s) a consultar (coma, espacio o salto de línea)",
-                 height=100, key="cf2_txt")
+                 height=90, key="cf2_txt",
+                 help="Opcional si consultas por rango de fechas.")
+    usar_fechas = st.checkbox("📅 Filtrar por rango de fecha de la factura (opcional)",
+                              key="cf2_usefecha")
+    if usar_fechas:
+        cfa, cfb = st.columns(2)
+        cfa.date_input("Fecha inicial", key="cf2_fi", format="YYYY-MM-DD")
+        cfb.date_input("Fecha final", key="cf2_ff", format="YYYY-MM-DD")
+        st.caption("Si **no** escribes N° de factura, trae **todas** las facturas del "
+                   "rango (por fecha de factura). El WS del RNDC no soporta rango, así "
+                   "que se consulta día por día — rangos amplios tardan más.")
     b1, b2 = st.columns([1, 1])
     b2.button("🗑 Limpiar módulo", key="cf2_clear", on_click=_cf_limpiar)
     if b1.button("🔍 Consultar", type="primary", key="cf2_btn"):
@@ -924,9 +967,12 @@ def modulo_consultar_factura(perfil):
             if f not in vistos:
                 vistos.add(f)
                 lista.append(f)
-        if not lista:
-            st.warning("Escribe al menos un N° de factura.")
-        else:
+
+        if lista:
+            # ── Modo por NÚMERO (una consulta exacta por factura) ──────────────
+            if usar_fechas:
+                st.info("Escribiste N° de factura: se consulta por número "
+                        "(el rango de fechas se ignora en este modo).")
             prog = st.progress(0.0, text="Consultando…")
             curados, full = [], {}
             for i, num in enumerate(lista, 1):
@@ -949,23 +995,65 @@ def modulo_consultar_factura(perfil):
             st.session_state["cf2_result"] = curados
             st.session_state["cf2_full"] = full
 
+        elif usar_fechas:
+            # ── Modo por RANGO DE FECHA (día por día, todas las del rango) ──────
+            fi = st.session_state.get("cf2_fi")
+            ff = st.session_state.get("cf2_ff")
+            with st.spinner("Consultando facturas del rango (día por día)…"):
+                try:
+                    ok, docs = consultar_facturas_por_fecha(perfil, fi, ff)
+                except Exception as e:
+                    ok, docs = False, str(e)
+            if not ok:
+                st.error(f"✗ {docs}")
+                st.session_state.pop("cf2_result", None)
+                st.session_state.pop("cf2_full", None)
+            else:
+                curados, full = [], {}
+                for d in docs:
+                    low = {str(k).lower(): v for k, v in d.items()}
+                    num = str(low.get("numerofactura", "")).strip()
+                    fila = _fact_curado(num, d)
+                    fila["Consulta"] = "✓ Encontrada"
+                    curados.append(fila)
+                    if num:
+                        full[num] = d
+                st.session_state["cf2_result"] = curados
+                st.session_state["cf2_full"] = full
+
+        else:
+            st.warning("Escribe al menos un N° de factura, o activa el rango de fechas.")
+
     curados = st.session_state.get("cf2_result")
     if not curados:
         return
     encontradas = [r for r in curados if r.get("Consulta", "").startswith("✓")]
     st.success(f"{len(curados)} factura(s) consultada(s) · {len(encontradas)} encontrada(s).")
 
-    # Ficha detallada del único resultado (si hay uno solo encontrado).
+    # Ficha detallada del único resultado, con los campos distribuidos en columnas
+    # (más legible que una tabla). CUFE va aparte al final por ser largo.
     if len(encontradas) == 1:
         f = encontradas[0]
         st.subheader("📋 Datos de la factura")
-        _df_ficha = pd.DataFrame([{"Campo": k, "Valor": v} for k, v in f.items() if k != "Consulta"])
-        st.dataframe(_df_ficha, use_container_width=True, hide_index=True)
-        _copiar_tabla(_df_ficha, "cp_cf2_ficha")
+        omitir = ("Consulta", "N° Factura consultada", "CUFE")
+        items = [(k, v) for k, v in f.items() if k not in omitir]
+        ncols = 3
+        for inicio in range(0, len(items), ncols):
+            cols_ui = st.columns(ncols)
+            for col, (k, v) in zip(cols_ui, items[inicio:inicio + ncols]):
+                col.markdown(_fact_card(k, v, accent=_fact_accent(k, v)),
+                             unsafe_allow_html=True)
+        cufe = f.get("CUFE", "")
+        if str(cufe).strip():
+            st.markdown(_fact_card("CUFE", cufe, accent="#1ea672", mono=True),
+                        unsafe_allow_html=True)
 
-    # Tabla de todas las consultadas (una fila por factura).
+    # Tabla de todas las consultadas (una fila por factura). Se omite la columna
+    # "N° Factura" del RNDC porque duplica "N° Factura consultada".
     st.subheader("📑 Facturas consultadas")
-    cols = ["N° Factura consultada"] + [lbl for lbl, _ in _FACT_CAMPOS] + ["Consulta"]
+    cols = (["N° Factura consultada"]
+            + [lbl for lbl, _ in _FACT_CAMPOS if lbl != "N° Factura"]
+            + ["Consulta"])
     df = pd.DataFrame(curados, columns=cols)
     st.dataframe(df, use_container_width=True, hide_index=True)
     _copiar_tabla(df, "cp_cf2_tabla")
@@ -973,13 +1061,18 @@ def modulo_consultar_factura(perfil):
                        df.to_csv(index=False).encode("utf-8-sig"),
                        file_name="consulta_facturas.csv", mime="text/csv", key="cf2_dl")
 
-    # Vista avanzada (colapsada): TODAS las variables crudas del RNDC.
+    # Vista avanzada (colapsada): TODAS las variables crudas del RNDC. Con pocas
+    # facturas, ficha vertical por factura; con varias, una tabla combinada (escala).
     full = st.session_state.get("cf2_full") or {}
     if full:
         with st.expander("🔧 Ver todas las variables crudas del RNDC (avanzado)"):
-            for num, res in full.items():
-                st.markdown(f"**Factura {num}**")
-                st.dataframe(pd.DataFrame([{"Variable": k, "Valor": v} for k, v in res.items()]),
+            if len(full) <= 3:
+                for num, res in full.items():
+                    st.markdown(f"**Factura {num}**")
+                    st.dataframe(pd.DataFrame([{"Variable": k, "Valor": v} for k, v in res.items()]),
+                                 use_container_width=True, hide_index=True)
+            else:
+                st.dataframe(pd.DataFrame(list(full.values())),
                              use_container_width=True, hide_index=True)
 
 
@@ -1183,11 +1276,13 @@ _MONITOREO_CAMPOS = [
 
 def modulo_consultar_tiempos(perfil):
     st.header("🛰️ Consultar Tiempos Logísticos")
-    st.caption("Consulta los tiempos de monitoreo por N° de manifiesto o por placa (proceso 60).")
+    st.caption("Consulta los tiempos de monitoreo por N° de manifiesto o por placa "
+               "(proceso 60). Al buscar por placa puedes acotar por rango de fecha.")
 
     def _tl_limpiar():
         st.session_state["tl_in"] = ""
         st.session_state["tl_placa"] = ""
+        st.session_state["tl_usefecha"] = False
         for k in ("tl_res", "tl_placa_res"):
             st.session_state.pop(k, None)
 
@@ -1195,6 +1290,17 @@ def modulo_consultar_tiempos(perfil):
     c1.text_area("N° Manifiesto(s) de carga (coma, espacio o salto de línea)",
                  height=100, key="tl_in")
     c2.text_input("Placa (opcional)", key="tl_placa")
+    usar_fechas = st.checkbox("📅 Acotar por rango de fecha (recomendado al buscar por placa)",
+                              key="tl_usefecha")
+    if usar_fechas:
+        cfa, cfb = st.columns(2)
+        cfa.date_input("Fecha inicial", key="tl_fi", format="YYYY-MM-DD")
+        cfb.date_input("Fecha final", key="tl_ff", format="YYYY-MM-DD")
+        st.caption("Una placa **sin fecha** trae **todo** su historial de monitoreo. "
+                   "El rango se consulta día por día — usa rangos cortos. Los manifiestos "
+                   "hallados se muestran con su **viaje completo** (origen + destino), "
+                   "aunque uno de los puntos se haya radicado fuera del rango. (En modo por "
+                   "N° de manifiesto la fecha no aplica: ya viene acotado.)")
     b1, b2 = st.columns([1, 1])
     b2.button("🗑 Limpiar módulo", key="tl_clear", on_click=_tl_limpiar)
 
@@ -1257,22 +1363,68 @@ def modulo_consultar_tiempos(perfil):
                     prog.progress(i / len(lista), text=f"{i}/{len(lista)}")
                 prog.empty()
             else:
-                # Solo placa (sin manifiestos)
-                item = {"man": "", "radicado": "", "docs": [], "citas": {}, "error": ""}
+                # Solo placa. Aplica el rango de fecha opcional. Los docs de monitoreo
+                # traen ingresoidmanifiesto (radicado) pero NO el número de manifiesto:
+                # se agrupan por radicado y de cada uno se resuelve el N° de manifiesto
+                # (proceso 4 por INGRESOID) y sus citas pactadas.
+                fi = st.session_state.get("tl_fi") if st.session_state.get("tl_usefecha") else ""
+                ff = st.session_state.get("tl_ff") if st.session_state.get("tl_usefecha") else ""
                 with st.spinner("Consultando tiempos de monitoreo…"):
-                    ok, docs = consultar_monitoreo_manifiesto(_perfil_monitoreo(perfil), placa=placa)
-                if ok:
-                    item["docs"] = docs
-                    for d in docs:
-                        _low = {str(k).lower(): v for k, v in d.items()}
-                        if _low.get("nummanifiestocarga"):
-                            item["man"] = _low["nummanifiestocarga"]
-                            break
-                    if item["man"]:
-                        item["citas"] = _tl_citas_de(item["man"])
+                    ok, docs = consultar_monitoreo_manifiesto(
+                        _perfil_monitoreo(perfil), placa=placa,
+                        fecha_inicial=fi, fecha_final=ff)
+                if not ok:
+                    resultados.append({"man": "", "radicado": "", "docs": [],
+                                       "citas": {}, "error": str(docs)})
                 else:
-                    item["error"] = str(docs)
-                resultados.append(item)
+                    # Agrupar por radicado (ingresoidmanifiesto), en orden de aparición.
+                    grupos, orden = {}, []
+                    for d in docs:
+                        low = {str(k).lower(): v for k, v in d.items()}
+                        rad = str(low.get("ingresoidmanifiesto", "")).strip()
+                        if rad not in grupos:
+                            grupos[rad] = []
+                            orden.append(rad)
+                        grupos[rad].append(d)
+                    MAX_ENRIQUECER = 25   # tope de lookups por manifiesto (3 req c/u)
+                    enriquecer = len(orden) <= MAX_ENRIQUECER
+                    if not enriquecer:
+                        st.info(f"La placa tiene {len(orden)} manifiestos en el resultado; "
+                                f"se omite resolver N° de manifiesto, citas y viaje completo "
+                                f"(acota por rango de fecha para verlos). Se muestra el radicado "
+                                f"con los puntos hallados en el rango.")
+                    pc = _perfil_corregir(perfil)
+                    pm = _perfil_monitoreo(perfil)
+                    prog2 = st.progress(0.0, text="Resolviendo manifiestos…") if enriquecer else None
+                    for idx, rad in enumerate(orden, 1):
+                        man_num, citas = "", {}
+                        docs_manif = grupos[rad]   # fallback: los puntos que trajo el filtro
+                        if enriquecer and rad:
+                            # 1) Viaje COMPLETO: todos los puntos del manifiesto por radicado
+                            #    (sin filtro de fecha) → así no se "parte" el viaje aunque el
+                            #    otro punto se haya radicado fuera del rango.
+                            try:
+                                okf, full_docs = consultar_monitoreo_manifiesto(
+                                    pm, radicado_manifiesto=rad)
+                            except Exception:
+                                okf, full_docs = False, None
+                            if okf and full_docs:
+                                docs_manif = full_docs
+                            # 2) N° de manifiesto (proceso 4 por INGRESOID) + citas pactadas
+                            try:
+                                okm, resm = consultar_manifiesto_por_radicado(rad, pc)
+                            except Exception:
+                                okm, resm = False, {}
+                            if okm and isinstance(resm, dict):
+                                man_num = str({k.lower(): v for k, v in resm.items()}
+                                              .get("nummanifiestocarga", "")).strip()
+                            if man_num:
+                                citas = _tl_citas_de(man_num)
+                            prog2.progress(idx / len(orden), text=f"{idx}/{len(orden)}")
+                        resultados.append({"man": man_num, "radicado": rad,
+                                           "docs": docs_manif, "citas": citas, "error": ""})
+                    if prog2 is not None:
+                        prog2.empty()
             st.session_state["tl_res"] = resultados
             st.session_state["tl_placa_res"] = placa
 
