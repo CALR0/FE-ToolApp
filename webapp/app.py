@@ -39,7 +39,7 @@ from services.rndc_service import (
     cumplir_remesa, consultar_manifiesto_completo, cumplir_manifiesto,
     consultar_monitoreo_manifiesto, consultar_remesas_por_manifiesto,
     consultar_factura, consultar_facturas_por_fecha,
-    consultar_manifiesto_por_radicado,
+    consultar_manifiesto_por_radicado, consultar_factura_por_remesa,
 )
 
 from webapp import lib_excel
@@ -536,9 +536,14 @@ def modulo_consultar_remesas(perfil):
     def _cq_limpiar():
         # Callback (corre antes de instanciar los widgets) → limpieza confiable
         st.session_state["cq_txt"] = ""
+        st.session_state["cq_raw"] = False
         st.session_state.pop("cq_filas", None)
+        st.session_state.pop("cq_full", None)
 
     txt = st.text_area("Consecutivo(s) de remesa", height=120, key="cq_txt")
+    traer_crudas = st.checkbox(
+        "🔧 Traer variables crudas (avanzado, más lento: 1 consulta extra por remesa)",
+        key="cq_raw")
     cbtn1, cbtn2 = st.columns([1, 1])
     cbtn2.button("🗑 Limpiar módulo", key="cq_clear", on_click=_cq_limpiar)
     if cbtn1.button("🔍 Consultar", type="primary", key="cq_btn"):
@@ -552,7 +557,7 @@ def modulo_consultar_remesas(perfil):
             if c not in vistos:
                 vistos.add(c); lista.append(c)
         prog = st.progress(0.0, text="Consultando…")
-        filas = []
+        filas, full = [], {}
         for i, consec in enumerate(lista, 1):
             try:
                 ok, res = consultar_radicado_remesa(consec, perfil)
@@ -570,9 +575,19 @@ def modulo_consultar_remesas(perfil):
                 filas.append({"Consecutivo": consec, "Radicado": "", "Peso (KG)": "",
                               "N° Manifiesto": "", "Propietario": "", "Origen": "",
                               "Destino": "", "Estado": f"✗ {res}"})
+            # Variables crudas (opcional): consulta completa (proceso 3, variables=*)
+            # de la remesa, con el MISMO consecutivo que usa la consulta curada.
+            if traer_crudas:
+                try:
+                    okf, resf = consultar_remesa_completa(consec, perfil)
+                except Exception:
+                    okf, resf = False, {}
+                if okf and isinstance(resf, dict):
+                    full[consec] = resf
             prog.progress(i / len(lista), text=f"{i}/{len(lista)}")
         prog.empty()
         st.session_state["cq_filas"] = filas   # persistir resultados
+        st.session_state["cq_full"] = full
 
     # Render de los resultados (persisten al cambiar de módulo)
     filas = st.session_state.get("cq_filas")
@@ -588,6 +603,16 @@ def modulo_consultar_remesas(perfil):
         st.download_button("⬇️ Descargar resultados (.csv)",
                            df_res.to_csv(index=False).encode("utf-8-sig"),
                            file_name="consulta_remesas.csv", mime="text/csv", key="cq_dl")
+
+        # Vista avanzada (colapsada) con TODAS las variables crudas del RNDC (proceso 3),
+        # solo si se pidió con el checkbox "Traer variables crudas".
+        full = st.session_state.get("cq_full") or {}
+        if full:
+            with st.expander("🔧 Ver todas las variables crudas del RNDC (avanzado)"):
+                for consec, res in full.items():
+                    st.markdown(f"**Remesa {consec}**")
+                    st.dataframe(pd.DataFrame([{"Variable": k, "Valor": v} for k, v in res.items()]),
+                                 use_container_width=True, hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -768,6 +793,39 @@ def _manif_curado(man, res):
     return fila
 
 
+# Campos de cada REMESA del manifiesto a mostrar (etiqueta → posibles nombres de
+# variable del RNDC en el proceso 3). El proceso 4 no trae esto; se obtiene aparte
+# con consultar_remesas_por_manifiesto (proceso 3 por NUMMANIFIESTOCARGA).
+_MANIF_REMESA_CAMPOS = [
+    ("N° Remesa",            ["CONSECUTIVOREMESA"]),
+    ("Radicado",             ["INGRESOID"]),
+    ("Estado",               ["ESTADO"]),
+    ("Fecha cita cargue",    ["FECHACITAPACTADACARGUE"]),
+    ("Hora cita cargue",     ["HORACITAPACTADACARGUE"]),
+    ("Fecha cita descargue", ["FECHACITAPACTADADESCARGUE"]),
+    ("Hora cita descargue",  ["HORACITAPACTADADESCARGUEREMESA", "HORACITAPACTADADESCARGUE"]),
+    ("Origen",               ["REM_ORIG", "REMCIUDAD_ORIG"]),
+    ("Destino",              ["REM_DESTI", "REMCIUDAD_DESTI"]),
+    ("Propietario",          ["REMPROPIETARIO"]),
+    ("Producto",             ["DESCRIPCIONCORTAPRODUCTO"]),
+    ("Peso/Cant.",           ["CANTIDADCARGADA", "CANTIDADPRODUCTO"]),
+]
+
+
+def _manif_remesa_curada(man, res):
+    """Igual que _manif_curado pero para una remesa (proceso 3). Case-insensitive."""
+    upper = {str(k).upper(): v for k, v in res.items()}
+    fila = {"N° Manifiesto": man}
+    for label, cands in _MANIF_REMESA_CAMPOS:
+        val = ""
+        for c in cands:
+            if c in upper and str(upper[c]).strip():
+                val = upper[c]
+                break
+        fila[label] = _estado_manifiesto_txt(val) if label == "Estado" else val
+    return fila
+
+
 def modulo_consultar_manifiesto(perfil):
     st.header("🔍 Consultar Manifiesto")
 
@@ -775,6 +833,7 @@ def modulo_consultar_manifiesto(perfil):
         st.session_state["cm_txt"] = ""
         st.session_state.pop("cm_result", None)
         st.session_state.pop("cm_full", None)
+        st.session_state.pop("cm_remesas", None)
 
     st.text_area("N° Manifiesto(s) de carga (coma, espacio o salto de línea)",
                  height=120, key="cm_txt")
@@ -792,7 +851,7 @@ def modulo_consultar_manifiesto(perfil):
         else:
             prog = st.progress(0.0, text="Consultando…")
             p = _perfil_corregir(perfil)   # mismas credenciales que corregir remesa
-            curados, full = [], {}
+            curados, full, remesas = [], {}, {}
             for i, man in enumerate(lista, 1):
                 try:
                     ok, res = consultar_manifiesto_completo(man, p)   # trae TODO (variables=*)
@@ -802,6 +861,14 @@ def modulo_consultar_manifiesto(perfil):
                     fila = _manif_curado(man, res)
                     fila["Consulta"] = "✓ Encontrado"
                     full[man] = res            # guardar el completo para vista avanzada
+                    # Remesas del manifiesto (proceso 3 por NUMMANIFIESTOCARGA): consecutivo,
+                    # citas pactadas, origen/destino, etc. — info que el proceso 4 no trae.
+                    try:
+                        okr, rems = consultar_remesas_por_manifiesto(man, p)
+                    except Exception:
+                        okr, rems = False, []
+                    if okr and rems:
+                        remesas[man] = rems
                 else:
                     fila = {"N° Manifiesto": man}
                     for label, _ in _MANIF_CAMPOS:
@@ -812,6 +879,7 @@ def modulo_consultar_manifiesto(perfil):
             prog.empty()
             st.session_state["cm_result"] = curados
             st.session_state["cm_full"] = full
+            st.session_state["cm_remesas"] = remesas
 
     curados = st.session_state.get("cm_result")
     if curados:
@@ -835,6 +903,34 @@ def modulo_consultar_manifiesto(perfil):
         st.download_button("⬇️ Descargar resultados (.csv)",
                            df.to_csv(index=False).encode("utf-8-sig"),
                            file_name="consulta_manifiestos.csv", mime="text/csv", key="cm_dl")
+
+        # Remesas de cada manifiesto (proceso 3 por NUMMANIFIESTOCARGA) — consecutivo,
+        # citas pactadas, origen/destino, etc. (el proceso 4 no las trae). Una fila por
+        # remesa, con su N° de manifiesto.
+        remesas = st.session_state.get("cm_remesas") or {}
+        if remesas:
+            total_rem = sum(len(v) for v in remesas.values())
+            st.subheader(f"📦 Remesas de los manifiestos ({total_rem})")
+            filas_rem = []
+            for man, rems in remesas.items():
+                for r in rems:
+                    filas_rem.append(_manif_remesa_curada(man, r))
+            cols_rem = ["N° Manifiesto"] + [lbl for lbl, _ in _MANIF_REMESA_CAMPOS]
+            df_rem = pd.DataFrame(filas_rem, columns=cols_rem)
+            st.dataframe(df_rem, use_container_width=True, hide_index=True)
+            _copiar_tabla(df_rem, "cp_cm_remesas")
+            st.download_button("⬇️ Descargar remesas (.csv)",
+                               df_rem.to_csv(index=False).encode("utf-8-sig"),
+                               file_name="remesas_manifiestos.csv", mime="text/csv",
+                               key="cm_rem_dl")
+            # Vista avanzada de las remesas (todas las variables crudas del proceso 3)
+            with st.expander("🔧 Ver todas las variables crudas de las remesas (avanzado)"):
+                for man, rems in remesas.items():
+                    for r in rems:
+                        consec = {str(k).lower(): v for k, v in r.items()}.get("consecutivoremesa", "")
+                        st.markdown(f"**Manifiesto {man} · Remesa {consec or '—'}**")
+                        st.dataframe(pd.DataFrame([{"Variable": k, "Valor": v} for k, v in r.items()]),
+                                     use_container_width=True, hide_index=True)
 
         # Vista avanzada (colapsada) con TODAS las variables crudas, por si se requiere
         full = st.session_state.get("cm_full") or {}
@@ -1069,6 +1165,151 @@ def modulo_consultar_factura(perfil):
             if len(full) <= 3:
                 for num, res in full.items():
                     st.markdown(f"**Factura {num}**")
+                    st.dataframe(pd.DataFrame([{"Variable": k, "Valor": v} for k, v in res.items()]),
+                                 use_container_width=True, hide_index=True)
+            else:
+                st.dataframe(pd.DataFrame(list(full.values())),
+                             use_container_width=True, hide_index=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MÓDULO: Consultar factura por remesa (proceso 34 — Tarifas Generador)
+# ─────────────────────────────────────────────────────────────────────────────
+# Campos importantes a mostrar (etiqueta amigable → nombres candidatos del RNDC).
+_FXR_CAMPOS = [
+    ("N° Remesa",           ["CONSECUTIVOREMESA"]),
+    ("Tipo factura",        ["TIPOFACTURAELECTRONICA"]),
+    ("Radicado remesa",     ["RADICADOREMESA"]),
+    ("Estado",              ["ESTADO"]),
+    ("Fecha creación",      ["FECHACREA"]),
+    ("Generador",           ["NOMBREGENERADOR"]),
+    ("NIT generador",       ["NUMIDGENERADOR"]),
+    ("Empresa",             ["NOMBREEMPRESA"]),
+    ("NIT empresa",         ["NUMIDEMPRESA"]),
+    ("Origen",              ["NOMBREORIGEN"]),
+    ("Destino",             ["NOMBREDESTINO"]),
+    ("Operación",           ["OPERACIONTRANSPORTE", "CODOPERACIONTRANSPORTE"]),
+    ("Configuración",       ["CONFIGURACION"]),
+    ("Valor tarifa",        ["VALORTARIFA"]),
+    ("Valor flete línea",   ["VALORFLETELINEA"]),
+    ("Cantidad remesas",    ["CANTIDADREMESAS"]),
+    ("N° Manifiesto",       ["CONSECUTIVOMANIFIESTO"]),
+    ("Radicado manifiesto", ["RADICADOMANIFIESTO"]),
+    ("Aprobado",            ["APROBADO"]),
+]
+
+
+def _fxr_curado(res):
+    """Extrae los campos importantes (nombres amigables) del dict completo. La factura
+    electrónica se saca aparte (se muestra destacada)."""
+    upper = {str(k).upper(): v for k, v in res.items()}
+    fila = {}
+    for label, cands in _FXR_CAMPOS:
+        val = ""
+        for c in cands:
+            if c in upper and str(upper[c]).strip():
+                val = upper[c]
+                break
+        fila[label] = _fact_limpio(val)
+    fila["Factura electrónica"] = _fact_limpio(upper.get("FACTURAELECTRONICA", ""))
+    return fila
+
+
+# Columnas (y orden) de la tabla de resultados de "Consultar factura por remesa".
+_FXR_COLS_TABLA = [
+    "N° Remesa", "Factura electrónica", "Tipo factura", "Estado", "Radicado remesa",
+    "Generador", "Origen", "Destino", "Valor tarifa", "Cantidad remesas",
+    "N° Manifiesto", "Consulta",
+]
+
+
+def modulo_consultar_factura_por_remesa(perfil):
+    st.header("🧾 Consultar Factura por Remesa")
+    st.caption("Busca la factura electrónica asociada a una o varias remesas (proceso 34).")
+
+    def _fxr_limpiar():
+        st.session_state["fxr_consec"] = ""
+        st.session_state["fxr_gen"] = ""
+        st.session_state.pop("fxr_rows", None)
+        st.session_state.pop("fxr_full", None)
+
+    c1, c2 = st.columns(2)
+    c1.text_area("Consecutivo(s) de remesa (coma, espacio o salto de línea)",
+                 height=100, key="fxr_consec")
+    c2.text_input("NIT del generador", key="fxr_gen",
+                  help="NIT del generador de carga (ej. 8000213085 = Drummond). "
+                       "Aplica a todas las remesas.")
+    b1, b2 = st.columns([1, 1])
+    b2.button("🗑 Limpiar módulo", key="fxr_clear", on_click=_fxr_limpiar)
+    if b1.button("🔍 Consultar", type="primary", key="fxr_btn"):
+        gen = st.session_state.get("fxr_gen", "").strip()
+        consecutivos = [t for t in re.split(r"[\s,;]+", st.session_state.get("fxr_consec", "").strip()) if t]
+        vistos, lista = set(), []
+        for c in consecutivos:
+            if c not in vistos:
+                vistos.add(c)
+                lista.append(c)
+        if not lista or not gen:
+            st.warning("Escribe al menos un consecutivo de remesa y el NIT del generador.")
+        else:
+            prog = st.progress(0.0, text="Consultando…")
+            rows, full = [], {}
+            for i, consec in enumerate(lista, 1):
+                try:
+                    ok, res = consultar_factura_por_remesa(consec, gen, perfil)
+                except Exception as e:
+                    ok, res = False, str(e)
+                if ok:
+                    fila = _fxr_curado(res)
+                    fila["N° Remesa"] = consec          # el consecutivo consultado
+                    fila["Consulta"] = "✓ Encontrada"
+                    full[consec] = res
+                else:
+                    fila = {lbl: "" for lbl, _ in _FXR_CAMPOS}
+                    fila["Factura electrónica"] = ""
+                    fila["N° Remesa"] = consec
+                    fila["Consulta"] = f"✗ {res}"
+                rows.append(fila)
+                prog.progress(i / len(lista), text=f"{i}/{len(lista)}")
+            prog.empty()
+            st.session_state["fxr_rows"] = rows
+            st.session_state["fxr_full"] = full
+
+    rows = st.session_state.get("fxr_rows")
+    if not rows:
+        return
+    encontradas = [r for r in rows if r.get("Consulta", "").startswith("✓")]
+    st.success(f"{len(rows)} remesa(s) consultada(s) · {len(encontradas)} con factura.")
+
+    # Ficha con tarjetas si hay UNA sola encontrada (dato principal = factura).
+    if len(encontradas) == 1:
+        r = encontradas[0]
+        fe = r.get("Factura electrónica", "")
+        st.markdown(_fact_card("Factura electrónica", fe or "—", accent="#1ea672"),
+                    unsafe_allow_html=True)
+        items = [(k, v) for k, v in r.items() if k not in ("Factura electrónica", "Consulta")]
+        ncols = 3
+        for inicio in range(0, len(items), ncols):
+            cols_ui = st.columns(ncols)
+            for col, (k, v) in zip(cols_ui, items[inicio:inicio + ncols]):
+                col.markdown(_fact_card(k, v), unsafe_allow_html=True)
+
+    # Tabla de todas las remesas consultadas.
+    st.subheader("📑 Remesas consultadas")
+    df = pd.DataFrame(rows, columns=_FXR_COLS_TABLA)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    _copiar_tabla(df, "cp_fxr")
+    st.download_button("⬇️ Descargar resultados (.csv)",
+                       df.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="facturas_por_remesa.csv", mime="text/csv", key="fxr_dl")
+
+    # Vista avanzada: todas las variables crudas del RNDC (escala con muchas remesas).
+    full = st.session_state.get("fxr_full") or {}
+    if full:
+        with st.expander("🔧 Ver todas las variables crudas del RNDC (avanzado)"):
+            if len(full) <= 3:
+                for consec, res in full.items():
+                    st.markdown(f"**Remesa {consec}**")
                     st.dataframe(pd.DataFrame([{"Variable": k, "Valor": v} for k, v in res.items()]),
                                  use_container_width=True, hide_index=True)
             else:
@@ -2473,6 +2714,7 @@ def _grupos(perfil):
             "Generar facturas vía Excel": modulo_generar_excel,
             "Cargar facturas a RNDC": modulo_cargar_rndc,
             "Consultar factura": modulo_consultar_factura,
+            "Consultar factura por remesa": modulo_consultar_factura_por_remesa,
         },
         "📋 Remesas": {
             "Consultar remesas": modulo_consultar_remesas,
