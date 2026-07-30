@@ -783,6 +783,65 @@ def consultar_factura_por_remesa(consecutivo_remesa, num_id_generador, perfil, t
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CONSULTA DE REMESAS DE UNA FACTURA — proceso 34 (Tarifas Generador), tipo 3.
+# Filtra por FACTURAELECTRONICA y devuelve UN documento por cada remesa de la factura
+# (la cantidad de remesas = número de documentos). Verificado en vivo.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RNDC_CONSULTA_REMESAS_X_FACTURA_TMPL = """<?xml version='1.0' encoding='ISO-8859-1' ?>
+<root>
+  <acceso>
+    <username>{usuario}</username>
+    <password>{password}</password>
+  </acceso>
+  <solicitud>
+    <tipo>3</tipo>
+    <procesoid>34</procesoid>
+  </solicitud>
+  <variables>*</variables>
+  <documento>
+    <NUMIDEMPRESA>'{nit_empresa}'</NUMIDEMPRESA>
+    <NUMIDGENERADOR>'{nit_generador}'</NUMIDGENERADOR>
+    <FACTURAELECTRONICA>'{factura}'</FACTURAELECTRONICA>
+  </documento>
+</root>"""
+
+
+def consultar_remesas_por_factura(num_factura, num_id_generador, perfil, timeout=20):
+    """
+    Consulta TODAS las remesas de una factura (proceso 34, tipo=3, variables=*),
+    filtrando por FACTURAELECTRONICA. Devuelve **un documento por remesa** de la
+    factura (la cantidad de remesas = número de documentos).
+
+    Filtro: NUMIDEMPRESA = nit_socio, NUMIDGENERADOR = NIT del generador (lo digita
+    el usuario), FACTURAELECTRONICA = número de la factura. Credenciales normales.
+
+    Retorna:
+        (ok: bool, resultado)
+        Si ok=True  → list[dict], una remesa por elemento (incluye consecutivoremesa,
+                      radicadoremesa, valorfletelinea, linea, origen/destino, etc.).
+        Si ok=False → str con el mensaje de error.
+    """
+    if not REQUESTS_OK:
+        return False, "La librería 'requests' no está instalada."
+    import html as _html
+    rndc_xml = _RNDC_CONSULTA_REMESAS_X_FACTURA_TMPL.format(
+        usuario=_html.escape(perfil.get("rndc_usuario", "")),
+        password=_html.escape(perfil.get("rndc_password", "")),
+        nit_empresa=_html.escape(perfil.get("nit_socio", "")),
+        nit_generador=_html.escape(str(num_id_generador).strip()),
+        factura=_html.escape(str(num_factura).strip()),
+    )
+    ok, docs = _post_consulta_multi(rndc_xml, timeout)
+    if not ok:
+        return False, docs
+    if not docs:
+        return False, (f"No se encontraron remesas para la factura {num_factura} "
+                       f"(¿generador/NIT y perfil correctos?).")
+    return True, docs
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CONSULTA DE FACTURAS POR RANGO DE FECHA — proceso 86, tipo 3.
 # El WS NO soporta rango nativo: solo filtra por FECHAFACTURA EXACTA (YYYY-MM-DD) y
 # devuelve TODAS las facturas de ese día. Por eso el rango se hace consultando
