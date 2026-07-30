@@ -40,6 +40,7 @@ from services.rndc_service import (
     consultar_monitoreo_manifiesto, consultar_remesas_por_manifiesto,
     consultar_factura, consultar_facturas_por_fecha,
     consultar_manifiesto_por_radicado, consultar_factura_por_remesa,
+    consultar_remesas_por_factura,
 )
 
 from webapp import lib_excel
@@ -1222,39 +1223,76 @@ _FXR_COLS_TABLA = [
     "N° Manifiesto", "Consulta",
 ]
 
+# Columnas de la tabla de remesas cuando se consulta POR FACTURA.
+_FXR_REM_COLS = ["N° Remesa", "Radicado remesa", "Origen", "Destino",
+                 "Configuración", "Valor flete", "Línea", "Estado"]
+
+
+def _fxr_int(v):
+    """Convierte a int para ordenar (por línea); 0 si no parsea."""
+    try:
+        return int(str(v).strip())
+    except Exception:
+        return 0
+
 
 def modulo_consultar_factura_por_remesa(perfil):
     st.header("🧾 Consultar Factura por Remesa")
-    st.caption("Busca la factura electrónica asociada a una o varias remesas (proceso 34).")
+    st.caption("Busca la factura de una(s) remesa(s), o todas las remesas de una(s) "
+               "factura(s) — proceso 34 (tarifa generador).")
 
     def _fxr_limpiar():
         st.session_state["fxr_consec"] = ""
+        st.session_state["fxr_fact"] = ""
         st.session_state["fxr_gen"] = ""
-        st.session_state.pop("fxr_rows", None)
-        st.session_state.pop("fxr_full", None)
+        for k in ("fxr_rows", "fxr_full", "fxr_fact_res"):
+            st.session_state.pop(k, None)
 
     c1, c2 = st.columns(2)
     c1.text_area("Consecutivo(s) de remesa (coma, espacio o salto de línea)",
-                 height=100, key="fxr_consec")
+                 height=90, key="fxr_consec",
+                 help="Consulta esas remesas y te dice a qué factura pertenece cada una.")
     c2.text_input("NIT del generador", key="fxr_gen",
-                  help="NIT del generador de carga (ej. 8000213085 = Drummond). "
-                       "Aplica a todas las remesas.")
+                  help="NIT del generador de carga (ej. 8000213085 = Drummond). Aplica a todo.")
+    st.text_area("…o Número(s) de factura (coma, espacio o salto de línea)",
+                 height=70, key="fxr_fact",
+                 help="Consulta TODAS las remesas asociadas a esa(s) factura(s).")
     b1, b2 = st.columns([1, 1])
     b2.button("🗑 Limpiar módulo", key="fxr_clear", on_click=_fxr_limpiar)
     if b1.button("🔍 Consultar", type="primary", key="fxr_btn"):
         gen = st.session_state.get("fxr_gen", "").strip()
-        consecutivos = [t for t in re.split(r"[\s,;]+", st.session_state.get("fxr_consec", "").strip()) if t]
-        vistos, lista = set(), []
-        for c in consecutivos:
-            if c not in vistos:
-                vistos.add(c)
-                lista.append(c)
-        if not lista or not gen:
-            st.warning("Escribe al menos un consecutivo de remesa y el NIT del generador.")
+        facturas = list(dict.fromkeys(
+            t for t in re.split(r"[\s,;]+", st.session_state.get("fxr_fact", "").strip()) if t))
+        remesas = list(dict.fromkeys(
+            t for t in re.split(r"[\s,;]+", st.session_state.get("fxr_consec", "").strip()) if t))
+
+        if not gen:
+            st.warning("Escribe el NIT del generador.")
+        elif not facturas and not remesas:
+            st.warning("Escribe al menos una remesa o un número de factura.")
+        elif facturas:
+            # ── MODO POR FACTURA (precedencia): trae TODAS las remesas de la factura ──
+            if remesas:
+                st.info("Se consultó por número de factura (las remesas escritas se "
+                        "ignoran en este modo).")
+            prog = st.progress(0.0, text="Consultando…")
+            fact_res = {}
+            for i, fact in enumerate(facturas, 1):
+                try:
+                    ok, docs = consultar_remesas_por_factura(fact, gen, perfil)
+                except Exception as e:
+                    ok, docs = False, str(e)
+                fact_res[fact] = docs if ok else {"error": str(docs)}
+                prog.progress(i / len(facturas), text=f"{i}/{len(facturas)}")
+            prog.empty()
+            st.session_state["fxr_fact_res"] = fact_res
+            st.session_state.pop("fxr_rows", None)
+            st.session_state.pop("fxr_full", None)
         else:
+            # ── MODO POR REMESA: consulta solo las remesas escritas (como antes) ──
             prog = st.progress(0.0, text="Consultando…")
             rows, full = [], {}
-            for i, consec in enumerate(lista, 1):
+            for i, consec in enumerate(remesas, 1):
                 try:
                     ok, res = consultar_factura_por_remesa(consec, gen, perfil)
                 except Exception as e:
@@ -1270,11 +1308,19 @@ def modulo_consultar_factura_por_remesa(perfil):
                     fila["N° Remesa"] = consec
                     fila["Consulta"] = f"✗ {res}"
                 rows.append(fila)
-                prog.progress(i / len(lista), text=f"{i}/{len(lista)}")
+                prog.progress(i / len(remesas), text=f"{i}/{len(remesas)}")
             prog.empty()
             st.session_state["fxr_rows"] = rows
             st.session_state["fxr_full"] = full
+            st.session_state.pop("fxr_fact_res", None)
 
+    # ── RENDER: modo por factura ─────────────────────────────────────────────────
+    fact_res = st.session_state.get("fxr_fact_res")
+    if fact_res:
+        _fxr_render_facturas(fact_res)
+        return
+
+    # ── RENDER: modo por remesa (como antes) ─────────────────────────────────────
     rows = st.session_state.get("fxr_rows")
     if not rows:
         return
@@ -1315,6 +1361,69 @@ def modulo_consultar_factura_por_remesa(perfil):
             else:
                 st.dataframe(pd.DataFrame(list(full.values())),
                              use_container_width=True, hide_index=True)
+
+
+def _fxr_render_facturas(fact_res):
+    """Render del modo POR FACTURA: por cada factura → ficha + cantidad de remesas +
+    lista de consecutivos + tabla de remesas + variables crudas."""
+    n_ok = sum(1 for v in fact_res.values() if isinstance(v, list) and v)
+    total_rem = sum(len(v) for v in fact_res.values() if isinstance(v, list))
+    st.success(f"{len(fact_res)} factura(s) · {n_ok} encontrada(s) · "
+               f"{total_rem} remesa(s) en total.")
+
+    for fact, docs in fact_res.items():
+        if not isinstance(docs, list) or not docs:
+            err = docs.get("error") if isinstance(docs, dict) else "sin remesas"
+            st.error(f"✗ Factura {fact}: {err}")
+            continue
+        docs_ord = sorted(docs, key=lambda d: _fxr_int({k.lower(): v for k, v in d.items()}.get("linea")))
+        first = {k.lower(): v for k, v in docs_ord[0].items()}
+
+        st.subheader(f"🧾 Factura {fact} — {len(docs_ord)} remesa(s)")
+        st.markdown(_fact_card("Factura electrónica", fact, accent="#1ea672"),
+                    unsafe_allow_html=True)
+        info = [
+            ("Generador", first.get("nombregenerador", "")),
+            ("NIT generador", first.get("numidgenerador", "")),
+            ("Empresa", first.get("nombreempresa", "")),
+            ("Estado", first.get("estado", "")),
+            ("Tipo factura", first.get("tipofacturaelectronica", "")),
+            ("Cantidad remesas", str(len(docs_ord))),
+        ]
+        ncols = 3
+        for inicio in range(0, len(info), ncols):
+            cols_ui = st.columns(ncols)
+            for col, (k, v) in zip(cols_ui, info[inicio:inicio + ncols]):
+                col.markdown(_fact_card(k, _fact_limpio(v)), unsafe_allow_html=True)
+        # Lista de consecutivos (los números de remesa de la factura).
+        consecs = [{k.lower(): v for k, v in d.items()}.get("consecutivoremesa", "") for d in docs_ord]
+        st.markdown(_fact_card("Consecutivos de remesa", ", ".join(c for c in consecs if c), mono=True),
+                    unsafe_allow_html=True)
+
+        # Tabla de las remesas de la factura.
+        filas = []
+        for d in docs_ord:
+            low = {k.lower(): v for k, v in d.items()}
+            filas.append({
+                "N° Remesa": low.get("consecutivoremesa", ""),
+                "Radicado remesa": low.get("radicadoremesa", ""),
+                "Origen": low.get("nombreorigen", ""),
+                "Destino": low.get("nombredestino", ""),
+                "Configuración": low.get("codconfiguracion", ""),
+                "Valor flete": low.get("valorfletelinea", ""),
+                "Línea": low.get("linea", ""),
+                "Estado": low.get("estado", ""),
+            })
+        df = pd.DataFrame(filas, columns=_FXR_REM_COLS)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        _copiar_tabla(df, f"cp_fxrf_{fact}")
+        st.download_button("⬇️ Descargar remesas (.csv)",
+                           df.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"remesas_factura_{fact}.csv", mime="text/csv",
+                           key=f"fxrf_dl_{fact}")
+        with st.expander(f"🔧 Variables crudas — factura {fact} (avanzado)"):
+            st.dataframe(pd.DataFrame([dict(d) for d in docs_ord]),
+                         use_container_width=True, hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
