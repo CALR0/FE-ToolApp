@@ -32,6 +32,7 @@ except Exception as _e_perf:
 import pandas as pd
 
 from config.perfiles import PERFILES
+from config.ajustes import FOPAT_FECHA_INICIO
 from core.xml_generator import generar_xml, _parse_valor
 from services.rndc_service import (
     consultar_radicado_remesa, consultar_remesa_completa,
@@ -1459,6 +1460,34 @@ def _cmf_num(raw):
         return "0"
 
 
+# ── FOPAT: aplica solo a manifiestos expedidos EN O DESPUÉS de la fecha de inicio ──
+def _fopat_fecha_inicio():
+    """Fecha de inicio de FOPAT (ajustable por sesión desde la barra lateral;
+    por defecto la de config/ajustes.py)."""
+    return st.session_state.get("fopat_fecha") or FOPAT_FECHA_INICIO
+
+
+def _parse_fecha_manif(s):
+    """Parsea una fecha del RNDC (D/MM/YYYY, DD/MM/YYYY, YYYY-MM-DD) → date | None."""
+    s = str(s or "").strip()
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except Exception:
+            continue
+    return None
+
+
+def _aplica_fopat(fecha_exp_str):
+    """True si el manifiesto (por su fecha de expedición) debe llevar FOPAT.
+    FOPAT aplica para expedición EN O DESPUÉS de la fecha de inicio. Si la fecha no
+    se puede parsear, devuelve True (mantiene el comportamiento anterior por seguridad)."""
+    d = _parse_fecha_manif(fecha_exp_str)
+    if d is None:
+        return True
+    return d >= _fopat_fecha_inicio()
+
+
 def modulo_cumplir_manifiesto(perfil):
     st.header("✅ Cumplir Manifiesto")
 
@@ -1496,7 +1525,8 @@ def modulo_cumplir_manifiesto(perfil):
                 st.session_state["cmf_ya_cumplido"] = (estado == "CE")
 
                 # Reset de los campos editables (evita arrastrar valores de una consulta previa)
-                for _k in ("cmf_tipo", "cmf_fecha", "cmf_rfopat", "cmf_vahc", "cmf_vdf", "cmf_vsa"):
+                for _k in ("cmf_tipo", "cmf_fecha", "cmf_rfopat", "cmf_refte",
+                           "cmf_vahc", "cmf_vdf", "cmf_vsa"):
                     st.session_state.pop(_k, None)
                 # Fuente de los valores del cumplido: proceso 6 si está cumplido, si no res4
                 src = res4
@@ -1515,8 +1545,13 @@ def modulo_cumplir_manifiesto(perfil):
                             st.session_state["cmf_fecha"] = datetime.strptime(_fed, "%d/%m/%Y").date()
                         except Exception:
                             pass
-                # Sembrar los campos de valores tal cual los trae la consulta
-                st.session_state["cmf_rfopat"] = _cmf_get(src, "retencionfopat")
+                # Sembrar los campos de valores tal cual los trae la consulta.
+                # FOPAT: si el manifiesto es anterior al inicio de FOPAT, se fuerza a 0
+                # (el campo quedará bloqueado en la UI). Después de la fecha, valor real.
+                _fexp_seed = _cmf_get(res4, "fechaexpedicionmanifiesto")
+                st.session_state["cmf_rfopat"] = (
+                    _cmf_get(src, "retencionfopat") if _aplica_fopat(_fexp_seed) else "0")
+                st.session_state["cmf_refte"] = _cmf_get(src, "retencionfuentemanifiesto")
                 st.session_state["cmf_vahc"] = _cmf_get(src, "valoradicionalhorascargue")
                 st.session_state["cmf_vdf"] = _cmf_get(src, "valordescuentoflete")
                 st.session_state["cmf_vsa"] = _cmf_get(src, "valorsobreanticipo")
@@ -1545,23 +1580,40 @@ def modulo_cumplir_manifiesto(perfil):
     tipo = tipo_lbl.split(" ")[0]
     fecha_str = fecha.strftime("%d/%m/%Y") if fecha else ""
 
+    # El cumplido SIEMPRE envía Retención en la Fuente y Retención FOPAT. Para
+    # manifiestos expedidos ANTES del inicio de FOPAT, el campo FOPAT queda bloqueado
+    # en 0 (no editable); después de la fecha, editable con su valor real.
+    fexp = _cmf_get(full, "fechaexpedicionmanifiesto")
+    aplica_fopat = _aplica_fopat(fexp)
+
     # Valores del cumplido (traídos de la consulta, editables). Vacío = 0 al enviar.
-    v1, v2, v3, v4 = st.columns(4)
-    v1.text_input("Retención FOPAT", key="cmf_rfopat", disabled=ya_cumplido)
-    v2.text_input("Valor adicional horas cargue", key="cmf_vahc", disabled=ya_cumplido)
-    v3.text_input("Valor descuento flete", key="cmf_vdf", disabled=ya_cumplido)
-    v4.text_input("Valor sobreanticipo", key="cmf_vsa", disabled=ya_cumplido)
+    vc = st.columns(5)
+    vc[0].text_input("Retención en la Fuente", key="cmf_refte", disabled=ya_cumplido)
+    vc[1].text_input("Retención FOPAT", key="cmf_rfopat",
+                     disabled=(ya_cumplido or not aplica_fopat),
+                     help=(None if aplica_fopat else
+                           f"Manifiesto anterior al inicio de FOPAT "
+                           f"({_fopat_fecha_inicio().strftime('%d/%m/%Y')}): va en 0, no editable."))
+    vc[2].text_input("Valor adicional horas cargue", key="cmf_vahc", disabled=ya_cumplido)
+    vc[3].text_input("Valor descuento flete", key="cmf_vdf", disabled=ya_cumplido)
+    vc[4].text_input("Valor sobreanticipo", key="cmf_vsa", disabled=ya_cumplido)
+    if not aplica_fopat and not ya_cumplido:
+        st.caption(f"ℹ Manifiesto expedido el **{fexp or '—'}** (antes de FOPAT): "
+                   "el FOPAT se envía en **0** y se envía la **Retención en la Fuente**.")
 
     confirma = st.checkbox("Confirmo el cumplido (registra datos reales en el RNDC)",
                            key="cmf_ok", disabled=ya_cumplido)
     if st.button("✅ Guardar cumplido del manifiesto", type="primary",
                  disabled=(not confirma or ya_cumplido), key="cmf_send"):
         p = _perfil_corregir(perfil)
+        # Pre-FOPAT → FOPAT forzado a 0; después → el valor del campo.
+        rfopat = "0" if not aplica_fopat else _cmf_num(st.session_state.get("cmf_rfopat", ""))
         variables = {
             "NUMNITEMPRESATRANSPORTE": p.get("nit_socio", ""),
             "NUMMANIFIESTOCARGA": man,
             "TIPOCUMPLIDOMANIFIESTO": tipo,
-            "RETENCIONFOPAT": _cmf_num(st.session_state.get("cmf_rfopat", "")),
+            "RETENCIONFOPAT": rfopat,
+            "RETENCIONFUENTEMANIFIESTO": _cmf_num(st.session_state.get("cmf_refte", "")),
             "FECHAENTREGADOCUMENTOS": fecha_str,
             "VALORADICIONALHORASCARGUE": _cmf_num(st.session_state.get("cmf_vahc", "")),
             "VALORDESCUENTOFLETE": _cmf_num(st.session_state.get("cmf_vdf", "")),
@@ -1575,6 +1627,142 @@ def modulo_cumplir_manifiesto(perfil):
             st.session_state["cmf_ya_cumplido"] = True
         else:
             st.error(f"✗ {r}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MÓDULO: Corregir FOPAT en manifiestos (descumplir + recumplir sin FOPAT, en lote)
+# ─────────────────────────────────────────────────────────────────────────────
+def _corregir_fopat_manifiesto(man, p, cod_anul, obs, put):
+    """Para un manifiesto PRE-FOPAT ya cumplido: captura su cumplido (proceso 6),
+    anula el cumplido (29) y lo vuelve a cumplir con FOPAT=0 + retención en la fuente,
+    conservando tipo/fecha/valores. Red de seguridad: si el re-cumplido falla, restaura
+    el cumplido original (con su FOPAT) para no dejarlo descumplido.
+    Retorna: 'corregido' | 'fopat_vigente' | 'no_cumplido' | 'error'."""
+    put(f"— Manifiesto {man}:")
+    try:
+        ok4, res4 = consultar_manifiesto_completo(man, p, procesoid=4)
+    except Exception as e:
+        ok4, res4 = False, str(e)
+    if not ok4 or not isinstance(res4, dict):
+        put(f"   ✗ No se pudo consultar: {res4}")
+        return "error"
+    fexp = _cmf_get(res4, "fechaexpedicionmanifiesto")
+    estado = _cmf_get(res4, "estado").upper()
+    if _aplica_fopat(fexp):
+        put(f"   → Expedido {fexp or '—'}: FOPAT vigente, no requiere corrección. Omitido.")
+        return "fopat_vigente"
+    if estado != "CE":
+        put(f"   → Estado {estado or '—'} (no cumplido): nada que descumplir. Omitido.")
+        return "no_cumplido"
+    # Capturar el cumplido (proceso 6) ANTES de anular
+    try:
+        ok6, snap = consultar_manifiesto_completo(man, p, procesoid=6)
+    except Exception as e:
+        ok6, snap = False, str(e)
+    if not ok6 or not isinstance(snap, dict):
+        put(f"   ✗ No se pudo capturar el cumplido (proceso 6): {snap}. Se omite (no se anula).")
+        return "error"
+    tipo   = _cmf_get(snap, "tipocumplidomanifiesto") or "C"
+    fecha  = _cmf_get(snap, "fechaentregadocumentos")
+    refte  = _cmf_get(snap, "retencionfuentemanifiesto")
+    fopat0 = _cmf_get(snap, "retencionfopat")        # original, para restaurar si falla
+    vahc   = _cmf_get(snap, "valoradicionalhorascargue")
+    vdf    = _cmf_get(snap, "valordescuentoflete")
+    vsa    = _cmf_get(snap, "valorsobreanticipo")
+    vars_sin = {
+        "NUMNITEMPRESATRANSPORTE": p.get("nit_socio", ""),
+        "NUMMANIFIESTOCARGA": man,
+        "TIPOCUMPLIDOMANIFIESTO": tipo,
+        "RETENCIONFOPAT": "0",
+        "RETENCIONFUENTEMANIFIESTO": _cmf_num(refte),
+        "FECHAENTREGADOCUMENTOS": fecha,
+        "VALORADICIONALHORASCARGUE": _cmf_num(vahc),
+        "VALORDESCUENTOFLETE": _cmf_num(vdf),
+        "MOTIVOVALORDESCUENTOMANIFIESTO": "F",
+        "VALORSOBREANTICIPO": _cmf_num(vsa),
+    }
+    # Anular cumplido (29)
+    try:
+        okA, rA = anular_cumplido_manifiesto(man, cod_anul, p, obs)
+    except Exception as e:
+        okA, rA = False, str(e)
+    if not okA:
+        put(f"   ✗ No se pudo anular el cumplido: {rA}. (Sigue cumplido; sin cambios.)")
+        return "error"
+    put(f"   ↻ Cumplido anulado (rad {rA.get('ingresoid','?')}). Re-cumpliendo sin FOPAT…")
+    # Re-cumplir con FOPAT=0 + retención en la fuente
+    try:
+        okC, rC = cumplir_manifiesto(vars_sin, p)
+    except Exception as e:
+        okC, rC = False, str(e)
+    if okC:
+        put(f"   ✓ Corregido: cumplido con FOPAT=0 + retención en la fuente "
+            f"({_cmf_num(refte)}). Rad {rC.get('ingresoid','?')}.")
+        return "corregido"
+    # Fallback: restaurar el cumplido original (con FOPAT) para no dejarlo descumplido
+    put(f"   ✗ Falló re-cumplir sin FOPAT: {rC}. Restaurando cumplido original…")
+    vars_restore = {**vars_sin, "RETENCIONFOPAT": _cmf_num(fopat0)}
+    try:
+        okR, rR = cumplir_manifiesto(vars_restore, p)
+    except Exception as e:
+        okR, rR = False, str(e)
+    if okR:
+        put(f"   ↩ Restaurado el cumplido original (con FOPAT). Rad {rR.get('ingresoid','?')}.")
+    else:
+        put(f"   ⚠ NO se pudo restaurar: {rR}. El manifiesto quedó DESCUMPLIDO — cúmplelo a mano.")
+    return "error"
+
+
+def modulo_corregir_fopat_manifiesto(perfil):
+    st.header("🩹 Corregir FOPAT en manifiestos")
+    st.caption("Para manifiestos expedidos ANTES del inicio de FOPAT que quedaron "
+               "cumplidos CON FOPAT: los descumple y vuelve a cumplir con FOPAT=0 + "
+               "retención en la fuente, conservando el resto del cumplido. Los "
+               "manifiestos FOPAT-vigentes o no cumplidos se omiten.")
+
+    def _cfp_limpiar():
+        st.session_state["cfp_txt"] = ""
+        st.session_state.pop("cfp_log", None)
+
+    st.text_area("N° Manifiesto(s) (coma, espacio o salto de línea)", height=120, key="cfp_txt")
+    c1, c2 = st.columns(2)
+    motivo = c1.selectbox("Motivo de anulación del cumplido", MOTIVOS_ANULACION, index=1, key="cfp_motivo")
+    obs = c2.text_input("Observaciones", key="cfp_obs",
+                        value="Correccion FOPAT (manifiesto anterior a FOPAT)")
+    b1, b2 = st.columns([1, 1])
+    b2.button("🗑 Limpiar módulo", key="cfp_clear", on_click=_cfp_limpiar)
+    confirma = st.checkbox("Confirmo: descumplir y volver a cumplir en el RNDC (operación real)",
+                           key="cfp_ok")
+    if b1.button("🩹 Corregir manifiestos", type="primary", disabled=not confirma, key="cfp_run"):
+        mans = list(dict.fromkeys(
+            t for t in re.split(r"[\s,;]+", st.session_state.get("cfp_txt", "").strip()) if t))
+        if not mans:
+            st.warning("Escribe al menos un N° de manifiesto.")
+        else:
+            p = _perfil_corregir(perfil)
+            cod = motivo.split(" ")[0]
+            log, tally = [], {"corregido": 0, "fopat_vigente": 0, "no_cumplido": 0, "error": 0}
+            def put(m):
+                log.append(m)
+            prog = st.progress(0.0, text="Corrigiendo…")
+            for i, man in enumerate(mans, 1):
+                try:
+                    status = _corregir_fopat_manifiesto(man, p, cod, obs.strip(), put)
+                except Exception as e:
+                    put(f"   ✗ Error inesperado en {man}: {e}")
+                    status = "error"
+                tally[status] = tally.get(status, 0) + 1
+                prog.progress(i / len(mans), text=f"{i}/{len(mans)}")
+            prog.empty()
+            log.append("")
+            log.append(f"RESUMEN: {tally['corregido']} corregido(s) · "
+                       f"{tally['fopat_vigente']} FOPAT vigente · "
+                       f"{tally['no_cumplido']} no cumplidos · {tally['error']} con error.")
+            st.session_state["cfp_log"] = log
+
+    log = st.session_state.get("cfp_log")
+    if log:
+        st.code("\n".join(log))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2150,33 +2338,38 @@ def _auto_procesar_remesa(consec, nit_nuevo, sede, tipoid, cod_anul, cod_camb, p
     manif_recumplir = None
 
     def _recumplir_manifiesto():
-        """Re-cumple el manifiesto con los mismos 9 campos que usa cumplir_manifiesto,
-        tomando tipo y retencionfopat de los datos capturados (proceso 6) antes de anular."""
+        """Re-cumple el manifiesto tomando tipo/fecha/retenciones del snapshot (proceso 6)
+        capturado antes de anular. Respeta la regla FOPAT: si la fecha de expedición del
+        manifiesto es anterior al inicio de FOPAT, NO envía RETENCIONFOPAT y en su lugar
+        envía RETENCIONFUENTEMANIFIESTO (que el RNDC exige en ese caso)."""
         if manif_recumplir is None:
             return
         put(f"6) Re-cumpliendo el manifiesto {manifiesto} con sus datos originales…")
-        # Leer tipo cumplido y retencionfopat del snapshot capturado
-        _tipo_rm = ""
-        _rfopat_raw = ""
-        _fecha_rm = ""
+        # Leer datos del snapshot capturado
+        _tipo_rm = _rfopat_raw = _refte_raw = _fecha_rm = _fexp = ""
         for _k, _v in manif_recumplir.items():
             kl = str(_k).lower()
             if kl == "tipocumplidomanifiesto":
                 _tipo_rm = str(_v).strip()
             elif kl == "retencionfopat":
                 _rfopat_raw = str(_v).strip()
+            elif kl == "retencionfuentemanifiesto":
+                _refte_raw = str(_v).strip()
             elif kl == "fechaentregadocumentos":
                 _fecha_rm = str(_v).strip()
-        try:
-            _clean = _rfopat_raw.replace(".", "").replace(",", ".") if "," in _rfopat_raw else _rfopat_raw
-            _rfopat = str(int(float(_clean))) if _rfopat_raw else "0"
-        except Exception:
-            _rfopat = "0"
+            elif kl == "fechaexpedicionmanifiesto":
+                _fexp = str(_v).strip()
+        # SIEMPRE se envían FOPAT y Retención en la Fuente. Pre-FOPAT → FOPAT=0.
+        _aplica = _aplica_fopat(_fexp)
+        if not _aplica:
+            put(f"   ℹ Manifiesto expedido {_fexp or '—'} (antes de FOPAT): FOPAT en 0, "
+                f"con retención en la fuente.")
         variables = {
             "NUMNITEMPRESATRANSPORTE": perfil.get("nit_socio", ""),
             "NUMMANIFIESTOCARGA": manifiesto,
             "TIPOCUMPLIDOMANIFIESTO": _tipo_rm or "C",
-            "RETENCIONFOPAT": _rfopat,
+            "RETENCIONFOPAT": _cmf_num(_rfopat_raw) if _aplica else "0",
+            "RETENCIONFUENTEMANIFIESTO": _cmf_num(_refte_raw),
             "FECHAENTREGADOCUMENTOS": _fecha_rm,
             "VALORADICIONALHORASCARGUE": "0",
             "VALORDESCUENTOFLETE": "0",
@@ -2836,6 +3029,7 @@ def _grupos(perfil):
             "Consultar manifiesto": modulo_consultar_manifiesto,
             "Consultar tiempos logísticos": modulo_consultar_tiempos,
             "Cumplir manifiesto": modulo_cumplir_manifiesto,
+            "Corregir FOPAT manifiesto": modulo_corregir_fopat_manifiesto,
             "Anular cumplido manifiesto": modulo_anular_cumplido_manifiesto,
         },
         "🔩 Otros": {
@@ -2869,6 +3063,13 @@ def main():
                     st.session_state["modulo_activo"] = nombre
                     st.rerun()
     st.sidebar.markdown("---")
+    with st.sidebar.expander("⚙️ Ajustes"):
+        st.date_input(
+            "Inicio FOPAT (0,1%)", key="fopat_fecha",
+            value=st.session_state.get("fopat_fecha", FOPAT_FECHA_INICIO),
+            format="YYYY-MM-DD",
+            help="Manifiestos expedidos ANTES de esta fecha no llevan FOPAT en el "
+                 "cumplido; en su lugar se envía la Retención en la Fuente.")
     st.sidebar.caption("V1.5 · versión web")
 
     # Render del módulo activo.

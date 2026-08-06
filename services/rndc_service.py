@@ -685,6 +685,19 @@ _RNDC_CONSULTA_FACT_X_REMESA_TMPL = """<?xml version='1.0' encoding='ISO-8859-1'
 </root>"""
 
 
+def _doc_mas_reciente(docs):
+    """De una lista de documentos del RNDC, devuelve el de **mayor INGRESOID** (el más
+    reciente). Útil cuando una remesa tiene varios registros de tarifa (re-tarifada:
+    uno viejo sin factura, otro reciente con la factura)."""
+    def _ing(d):
+        low = {str(k).lower(): v for k, v in d.items()}
+        try:
+            return int(str(low.get("ingresoid", "0")).strip() or 0)
+        except Exception:
+            return 0
+    return max(docs, key=_ing) if docs else None
+
+
 def consultar_factura_por_remesa(consecutivo_remesa, num_id_generador, perfil, timeout=20):
     """
     Consulta la tarifa del generador (proceso 34, tipo=3, variables=*) de una remesa.
@@ -695,16 +708,18 @@ def consultar_factura_por_remesa(consecutivo_remesa, num_id_generador, perfil, t
     (lo digita el usuario), `CONSECUTIVOREMESA` = consecutivo de la remesa. Usa las
     credenciales normales del perfil (`rndc_usuario`/`rndc_password`).
 
+    Si la remesa tiene **varios registros** (re-tarifada: uno viejo sin factura y otro
+    reciente con la factura), devuelve el **más reciente** (mayor INGRESOID).
+
     Retorna:
         (ok: bool, resultado)
-        Si ok=True  → dict {tag: valor} con todos los campos del `<documento>`.
+        Si ok=True  → dict {tag: valor} del documento más reciente.
         Si ok=False → str con el mensaje de error.
     """
     if not REQUESTS_OK:
         return False, "La librería 'requests' no está instalada."
 
-    import html as _html, xml.etree.ElementTree as ET, re as _re
-
+    import html as _html
     rndc_xml = _RNDC_CONSULTA_FACT_X_REMESA_TMPL.format(
         usuario=_html.escape(perfil.get("rndc_usuario", "")),
         password=_html.escape(perfil.get("rndc_password", "")),
@@ -712,74 +727,13 @@ def consultar_factura_por_remesa(consecutivo_remesa, num_id_generador, perfil, t
         nit_generador=_html.escape(str(num_id_generador).strip()),
         consecutivo=_html.escape(str(consecutivo_remesa).strip()),
     )
-    soap_body = _RNDC_CONSULTA_SOAP_ENVELOPE.format(
-        rndc_xml_escaped=_html.escape(rndc_xml)
-    )
-
-    url     = _RNDC_CONSULTA_ENDPOINT + _RNDC_CONSULTA_SOAP_PATH
-    headers = {
-        "Content-Type": "text/xml; charset=UTF-8",
-        "SOAPAction":   _RNDC_CONSULTA_ACTION,
-    }
-
-    try:
-        resp = _requests.post(url, data=soap_body.encode("utf-8"),
-                              headers=headers, timeout=timeout)
-    except _requests.exceptions.ConnectionError:
-        return False, f"Sin conexión a {_RNDC_CONSULTA_ENDPOINT}"
-    except _requests.exceptions.Timeout:
-        return False, f"Tiempo de espera agotado ({timeout}s)"
-    except Exception as e:
-        return False, str(e)[:180]
-
-    inner_raw = None
-    m = _re.search(r'<[^>]*:?return[^>]*>(.*?)</[^>]*:?return>',
-                   resp.text, _re.DOTALL | _re.IGNORECASE)
-    if m:
-        inner_raw = m.group(1).strip()
-    if not inner_raw:
-        m2 = _re.search(r'(<root[^>]*>.*?</root>)', resp.text,
-                        _re.DOTALL | _re.IGNORECASE)
-        if m2:
-            inner_raw = m2.group(1).strip()
-    if not inner_raw:
-        return False, f"Respuesta no reconocida: {resp.text.strip()[:200]}"
-
-    inner = _html.unescape(inner_raw)
-
-    def _parse(texto):
-        for intento in (texto, texto.encode("iso-8859-1", errors="ignore"),
-                        _re.sub(r'<\?xml[^?]*\?>', '', texto, count=1).strip()):
-            try:
-                return ET.fromstring(intento)
-            except Exception:
-                continue
-        return None
-
-    root_el = _parse(inner)
-    if root_el is None:
-        campos = _campos_documento_regex(inner)
-        if campos:
-            return True, campos
-        return False, f"No se pudo parsear la respuesta: {inner[:200]}"
-
-    for tag in (".//ErrorMSG", ".//error"):
-        el = root_el.find(tag)
-        if el is not None and el.text and el.text.strip():
-            return False, el.text.strip()
-
-    doc_el = root_el.find(".//documento")
-    if doc_el is None:
-        campos = _campos_documento_regex(inner)
-        if campos:
-            return True, campos
+    ok, docs = _post_consulta_multi(rndc_xml, timeout)
+    if not ok:
+        return False, docs
+    if not docs:
         return False, (f"No se encontró tarifa para la remesa {consecutivo_remesa} "
                        f"(¿generador/NIT correctos y perfil correcto?).")
-
-    campos = {child.tag: (child.text or "").strip() for child in doc_el}
-    if not campos:
-        return False, "El <documento> no trajo campos."
-    return True, campos
+    return True, _doc_mas_reciente(docs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
