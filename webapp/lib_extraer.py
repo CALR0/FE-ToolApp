@@ -60,34 +60,49 @@ def _extraer_pdf_bytes(contenido):
     except Exception:
         total_factura = 0.0
 
-    m_inicio = re.search(
+    # Extracción de líneas robusta para PDFs de VARIAS PÁGINAS. El bloque de ítems
+    # puede repetirse por página (el header "REFERENCIA…" reaparece) y/o traer un
+    # subtotal por página. Se procesan TODOS los bloques: cada header va hasta su
+    # footer (Observaciones/SUBTOTAL) o hasta el siguiente header, lo que llegue
+    # primero. Así no se pierden las remesas de las páginas 2+.
+    header_re = re.compile(
         r"REFERENCIA\s+DESCRIPCION\s+CANTIDAD\s+UND\s+VR\.\s*UNITARIO\s+VR\.\s*TOTAL",
-        texto, re.IGNORECASE)
-    m_fin = re.search(r"\bObservaciones\b|\bSUBTOTAL\b", texto, re.IGNORECASE)
+        re.IGNORECASE)
+    footer_re = re.compile(r"\bObservaciones\b|\bSUBTOTAL\b", re.IGNORECASE)
+
+    def _parsear_linea(linea):
+        linea = linea.strip()
+        if not linea:
+            return None
+        m_lin = re.match(r"(\S+)\s+(.+?)\s+([\d.,]+)\s+\S+\s+([\d.,]+)\s+([\d.,]+)\s*$", linea)
+        if m_lin:
+            ref, desc, cant_s, vru_s, vrt_s = m_lin.group(1, 2, 3, 4, 5)
+        else:
+            m_lin = re.match(r"(\S+)\s+(.+?)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$", linea)
+            if not m_lin:
+                return None
+            ref, desc, cant_s, vru_s, vrt_s = m_lin.groups()
+        try:
+            return {"referencia": ref.strip(), "descripcion": desc.strip(),
+                    "cantidad": _parse_valor(cant_s), "vr_unitario": _parse_valor(vru_s),
+                    "vr_total": _parse_valor(vrt_s)}
+        except Exception:
+            return None
 
     lineas = []
-    if m_inicio and m_fin and m_fin.start() > m_inicio.end():
-        bloque = texto[m_inicio.end():m_fin.start()].strip()
-        for linea in bloque.split("\n"):
-            linea = linea.strip()
-            if not linea:
-                continue
-            m_lin = re.match(r"(\S+)\s+(.+?)\s+([\d.,]+)\s+\S+\s+([\d.,]+)\s+([\d.,]+)\s*$", linea)
-            if not m_lin:
-                m_lin = re.match(r"(\S+)\s+(.+?)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$", linea)
-                if not m_lin:
-                    continue
-                ref, desc, cant_s, vru_s, vrt_s = m_lin.groups()
-            else:
-                ref, desc, cant_s, vru_s, vrt_s = m_lin.group(1, 2, 3, 4, 5)
-            try:
-                cantidad = _parse_valor(cant_s)
-                vr_unitario = _parse_valor(vru_s)
-                vr_total = _parse_valor(vrt_s)
-            except Exception:
-                continue
-            lineas.append({"referencia": ref.strip(), "descripcion": desc.strip(),
-                           "cantidad": cantidad, "vr_unitario": vr_unitario, "vr_total": vr_total})
+    headers = list(header_re.finditer(texto))
+    for idx, hm in enumerate(headers):
+        inicio = hm.end()
+        fin = len(texto)
+        fm = footer_re.search(texto, inicio)
+        if fm:
+            fin = min(fin, fm.start())
+        if idx + 1 < len(headers):
+            fin = min(fin, headers[idx + 1].start())
+        for linea in texto[inicio:fin].split("\n"):
+            item = _parsear_linea(linea)
+            if item:
+                lineas.append(item)
 
     return {"numero_factura": numero_factura, "fecha_generacion": fecha_generacion,
             "cufe": cufe, "nit_cliente": nit_cliente, "nombre_cliente": nombre_cliente,
