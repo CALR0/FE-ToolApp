@@ -17,8 +17,56 @@ MAX_CANTIDAD_EXPANSION = 100
 COLUMNAS_EXPORT = [
     "numero_factura", "fecha_generacion", "cufe", "nit", "nombre_cliente",
     "descripcion", "consecutivo_remesa", "radicado",
-    "valor_unitario", "valor_total_factura", "cantidad_remesas_rg",
+    "valor_unitario", "valor_total_factura", "cantidad_remesas_rg", "perfil",
 ]
+
+
+def _perfil_por_consecutivo(consec):
+    """Detecta el perfil por el formato del consecutivo de la RG y normaliza el número.
+    Devuelve (perfil, consecutivo_normalizado):
+      - Elogia: empieza en '101' → 'elogia', se antepone '0' (0101...). Si ya trae el
+        0 ('0101…') se respeta.
+      - TSP: empieza en '3000' o '120' → 'tsp', tal cual.
+      - No cae en ninguna regla → ('', consec) — NO se adivina; queda marcado vacío
+        para revisión manual.
+    """
+    s = re.sub(r"\D", "", str(consec or ""))
+    if not s:
+        return "", s
+    if s.startswith("0101"):
+        return "elogia", s
+    if s.startswith("101"):
+        return "elogia", "0" + s
+    if s.startswith("300") or s.startswith("120"):
+        return "tsp", s
+    return "", s
+
+# Dígito de verificación DIAN (módulo 11) — las RG traen el NIT SIN el dígito; el
+# generador de XML espera el NIT con dígito (toma el último como dígito). Se calcula
+# y se anexa automáticamente, sin necesidad de una tabla por cliente.
+_DV_PESOS = [3, 7, 13, 17, 19, 23, 29, 37, 41, 43, 47, 53, 59, 67, 71]
+
+
+def _digito_verificacion(nit_base):
+    """DV DIAN (módulo 11) del NIT base (solo dígitos)."""
+    s = re.sub(r"\D", "", str(nit_base))
+    if not s:
+        return ""
+    total = sum(int(c) * (_DV_PESOS[i] if i < len(_DV_PESOS) else 0)
+                for i, c in enumerate(reversed(s)))
+    r = total % 11
+    return str(r if r < 2 else 11 - r)
+
+
+def _nit_con_dv(nit_raw):
+    """NIT completo (base + dígito de verificación). Si el número YA trae un DV válido
+    como último dígito, lo respeta (no lo duplica); si no, lo calcula y lo anexa."""
+    s = re.sub(r"\D", "", str(nit_raw or ""))
+    if not s:
+        return ""
+    if len(s) >= 2 and _digito_verificacion(s[:-1]) == s[-1]:
+        return s
+    return s + _digito_verificacion(s)
 
 
 def _extraer_pdf_bytes(contenido):
@@ -41,7 +89,7 @@ def _extraer_pdf_bytes(contenido):
     m = re.search(r"CLIENTE\s*:.*?NIT:\s*([\d.\-]+)", texto, re.IGNORECASE | re.DOTALL)
     if not m:
         m = re.search(r"NOMBRE:.*?NIT:\s*([\d.\-]+)", texto, re.IGNORECASE | re.DOTALL)
-    nit_cliente = m.group(1).strip() if m else ""
+    nit_cliente = _nit_con_dv(m.group(1).strip()) if m else ""
 
     m = re.search(r"CLIENTE\s*:\s*(.+)", texto, re.IGNORECASE)
     if not m:
@@ -117,6 +165,10 @@ def _expandir_lineas(datos, usar_ref_como_consec=False):
         vr_unit_orig = lin["vr_unitario"]
         vr_total_lin = lin.get("vr_total", vr_unit_orig)
         consec = lin["referencia"] if usar_ref_como_consec else ""
+        # Detecta perfil (tsp/elogia) y normaliza el consecutivo (antepone 0 a Elogia).
+        perfil_det = ""
+        if consec:
+            perfil_det, consec = _perfil_por_consecutivo(consec)
         es_entero = abs(cant - round(cant)) < 1e-9
         es_conteo = es_entero and (1 <= cant <= MAX_CANTIDAD_EXPANSION)
         if es_conteo:
@@ -131,7 +183,8 @@ def _expandir_lineas(datos, usar_ref_como_consec=False):
                 "cufe": datos["cufe"], "nit": datos.get("nit_cliente", ""),
                 "nombre_cliente": datos.get("nombre_cliente", ""), "descripcion": lin["descripcion"],
                 "consecutivo_remesa": consec, "radicado": "", "valor_unitario": vr_unit_ind,
-                "valor_total_factura": datos["total_factura"], "cantidad_remesas_rg": n_remesas})
+                "valor_total_factura": datos["total_factura"], "cantidad_remesas_rg": n_remesas,
+                "perfil": perfil_det})
     total_remesas = len(filas)
     for f in filas:
         f["cantidad_remesas_rg"] = total_remesas

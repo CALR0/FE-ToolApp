@@ -19,3 +19,10 @@ from datetime import date
 # sesión desde la barra lateral (⚙️ Ajustes); este valor es el predeterminado.
 # ─────────────────────────────────────────────────────────────────────────────
 FOPAT_FECHA_INICIO = date(2026, 4, 1)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Máximo de facturas a generar por cargue en "Generar facturas vía Excel".
+# Es el tope que se suele manejar por lote. Ajustable en la app (⚙️ Ajustes) por
+# sesión; este es el valor predeterminado.
+# ─────────────────────────────────────────────────────────────────────────────
+MAX_FACTURAS_GENERAR = 100

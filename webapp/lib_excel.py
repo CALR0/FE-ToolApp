@@ -46,6 +46,7 @@ CAMPOS = [
     ("col_desc_lin",   "Descripción línea (opcional)", False),
     ("col_nit_cli",    "NIT cliente (opcional)",     False),
     ("col_nom_cli",    "Nombre cliente (opcional)",  False),
+    ("col_perfil",     "Perfil (opcional)",          False),
     ("col_novedad",    "Novedad remesa (opcional)",  False),
     ("col_comp_gen",   "Comp. Generador Carga RNDC (opcional)", False),
     ("col_rem_creada", "Remesa creada RNDC (opcional)", False),
@@ -54,6 +55,53 @@ CAMPOS = [
     ("col_rem_facturada", "Remesa facturada (opcional)", False),
     ("col_estado",     "Estado (opcional)",          False),
 ]
+
+
+# Auto-mapeo: nombre de columna esperado por campo (el datos_rg tiene estructura fija).
+# Match por nombre normalizado EXACTO (sin substring, para no confundir p. ej. 'nit'
+# con 'valor_unitario'). Si no hay match claro, el campo queda en "— No usar —".
+_AUTO_HINTS = {
+    "col_nf":         ["numero_factura", "n_factura", "nro_factura"],
+    "col_cufe":       ["cufe"],
+    "col_fecha":      ["fecha_generacion", "fecha"],
+    "col_consec":     ["consecutivo_remesa", "consecutivo"],
+    # 'radicado' NO se auto-mapea a propósito: en datos_rg siempre viene vacío y el
+    # radicado se consulta solo al RNDC por consecutivo (fase 1 del generado). Queda en
+    # "— No usar —"; el usuario puede mapearlo a mano si su Excel sí lo trae con valor.
+    "col_val_rem":    ["valor_unitario"],
+    "col_val_fac":    ["valor_total_factura"],
+    "col_peso":       ["peso", "peso_kgm"],
+    "col_desc_lin":   ["descripcion"],
+    "col_nit_cli":    ["nit"],
+    "col_nom_cli":    ["nombre_cliente"],
+    "col_perfil":     ["perfil"],
+    "col_novedad":    ["novedad_remesa", "novedad"],
+    "col_estado":     ["estado"],
+}
+
+
+def _norm_col(s):
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+
+def auto_mapear(df):
+    """Detecta la columna de cada campo por nombre (match normalizado exacto).
+    Devuelve {clave: nombre_columna} solo para los que encuentra. Los demás quedan sin
+    mapear. Pensado para el datos_rg (nombres fijos), pero no fuerza nada dudoso."""
+    if df is None:
+        return {}
+    cols = [str(c) for c in df.columns]
+    norm = {c: _norm_col(c) for c in cols}
+    usados, m = set(), {}
+    for clave, hints in _AUTO_HINTS.items():
+        for h in hints:
+            hn = _norm_col(h)
+            elegido = next((c for c in cols if norm[c] == hn and c not in usados), None)
+            if elegido:
+                m[clave] = elegido
+                usados.add(elegido)
+                break
+    return m
 
 
 # ── Helpers (idénticos a ExcelLoaderWindow) ──────────────────────────────────
@@ -206,6 +254,7 @@ def parsear(df, mapping, filtro, cond_values, nit_cli_fijo="800021308",
     c_desc_lin = mapping.get("col_desc_lin")
     c_nit_cli  = mapping.get("col_nit_cli")
     c_nom_cli  = mapping.get("col_nom_cli")
+    c_perfil   = mapping.get("col_perfil")
 
     datos_list = []
     for nf, grupo in df.groupby(df[c_nf].astype(str)):
@@ -271,9 +320,15 @@ def parsear(df, mapping, filtro, cond_values, nit_cli_fijo="800021308",
             if v and v.lower() not in ("nan", "none", ""):
                 nom_cli = v
 
+        perfil_fac = ""
+        if c_perfil:
+            _vp = str(primera[c_perfil]).strip().lower()
+            if _vp in ("tsp", "elogia"):
+                perfil_fac = _vp
+
         datos_list.append({
             "numero_factura": nf, "cufe": cufe, "fecha": fecha,
             "nit_cliente": nit_cli, "digito_cliente": dig_cli, "nombre_cliente": nom_cli,
-            "valor_total": val_fac, "remesas": remesas,
+            "valor_total": val_fac, "remesas": remesas, "perfil": perfil_fac,
         })
     return datos_list

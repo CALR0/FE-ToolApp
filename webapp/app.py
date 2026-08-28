@@ -32,7 +32,7 @@ except Exception as _e_perf:
 import pandas as pd
 
 from config.perfiles import PERFILES
-from config.ajustes import FOPAT_FECHA_INICIO
+from config.ajustes import FOPAT_FECHA_INICIO, MAX_FACTURAS_GENERAR
 from core.xml_generator import generar_xml, _parse_valor
 from services.rndc_service import (
     consultar_radicado_remesa, consultar_remesa_completa,
@@ -96,13 +96,20 @@ def _style_estado(val):
 
 
 # Límite de facturas por cargue en la web (el desktop usa 200; aquí 100 por pedido).
-_MAX_FACTURAS_WEB = 100
+def _max_facturas():
+    """Tope de facturas por cargue. Ajustable por sesión en ⚙️ Ajustes; default de
+    `config/ajustes.py` (MAX_FACTURAS_GENERAR)."""
+    try:
+        v = int(st.session_state.get("max_facturas") or MAX_FACTURAS_GENERAR)
+        return v if v > 0 else MAX_FACTURAS_GENERAR
+    except Exception:
+        return MAX_FACTURAS_GENERAR
 
 
 def _get_cantidad_web(raw, total_disponible):
-    """Réplica de _get_cantidad del desktop (ui/excel_loader.py) con MAX=100.
-    Retorna (n, error_msg): n = cuántas facturas generar, error_msg=None si OK."""
-    MAX_FAC = _MAX_FACTURAS_WEB
+    """Réplica de _get_cantidad del desktop (ui/excel_loader.py) con MAX configurable
+    (⚙️ Ajustes). Retorna (n, error_msg): n = cuántas generar, error_msg=None si OK."""
+    MAX_FAC = _max_facturas()
     raw = (raw or "").strip()
     if raw == "":
         if total_disponible > MAX_FAC:
@@ -169,6 +176,23 @@ def _consec_efectivo(consec, perfil):
     if perfil.get("prefijo_remesa") and consec and not consec.startswith("0"):
         consec = "0" + consec
     return consec
+
+
+def _perfil_de_factura(datos_factura):
+    """Detecta el perfil (dict de PERFILES) de una factura por el formato del consecutivo
+    de sus remesas (reutiliza `lib_extraer._perfil_por_consecutivo`). Devuelve
+    (perfil_dict | None, nombre 'tsp'|'elogia'|''). None/'' si no se puede determinar
+    (consecutivos que no caen en ninguna regla) — para no adivinar el perfil."""
+    votos = {}
+    for rem in datos_factura.get("remesas", []):
+        pdet, _ = lib_extraer._perfil_por_consecutivo(rem.get("consecutivo", ""))
+        if pdet:
+            votos[pdet] = votos.get(pdet, 0) + 1
+    if not votos:
+        return None, ""
+    nombre = max(votos, key=votos.get)   # el más votado (deberían ser todos iguales)
+    pid = "ut_tsp" if nombre == "tsp" else "ut_elogia"
+    return PERFILES.get(pid), nombre
 
 
 def _placeholder(nombre):
@@ -338,7 +362,8 @@ def modulo_generar_xml(perfil):
 # ─────────────────────────────────────────────────────────────────────────────
 def modulo_generar_excel(perfil):
     st.header("📊 Generar facturas vía Excel")
-    st.caption("Sube el Excel, mapea las columnas a mano y genera los XML (descarga en .zip).")
+    st.caption("Sube el Excel: las columnas se **auto-mapean** por nombre (datos_rg) y el "
+               "perfil (TSP/Elogia) se toma de la columna `perfil` si viene. Genera los XML (.zip).")
 
     archivo = st.file_uploader("Archivo Excel", type=["xlsx", "xls", "xlsm"], key="gx_file")
     if archivo is not None:   # cachear bytes para que persista al cambiar de módulo
@@ -360,6 +385,16 @@ def modulo_generar_excel(perfil):
     st.caption(f"Hoja '{hoja}' · {len(df)} filas · {len(df.columns)} columnas")
 
     cols_opt = ["— No usar —"] + list(df.columns.astype(str))
+
+    # Auto-mapeo: al cargar un archivo/hoja nuevo se siembran los combos con las columnas
+    # detectadas por nombre (el datos_rg tiene estructura fija → queda todo mapeado solo).
+    # El usuario puede cambiar cualquiera; se re-siembra solo si cambia archivo/hoja/columnas.
+    _sig = (st.session_state.get("gx_name", ""), hoja, tuple(str(c) for c in df.columns))
+    if st.session_state.get("gx_map_sig") != _sig:
+        _auto = lib_excel.auto_mapear(df)
+        for _clave, _e, _r in lib_excel.CAMPOS:
+            st.session_state[f"gx_map_{_clave}"] = _auto.get(_clave, "— No usar —")
+        st.session_state["gx_map_sig"] = _sig
 
     st.subheader("Mapeo de columnas")
     mapping = {}
@@ -396,7 +431,7 @@ def modulo_generar_excel(perfil):
 
     st.subheader("Cantidad de facturas a generar")
     cant_raw = st.text_input(
-        f"Cuántas generar (máx. {_MAX_FACTURAS_WEB}) — deja vacío para generar todas",
+        f"Cuántas generar (máx. {_max_facturas()}) — deja vacío para generar todas",
         value="", key="gx_cant", max_chars=3,
         placeholder="vacío = todas")
 
@@ -404,6 +439,24 @@ def modulo_generar_excel(perfil):
     if not ok:
         st.warning(msg)
         return
+
+    def _pf(d):
+        """(perfil_dict, nombre) de una factura: por la columna 'perfil' del Excel si viene
+        (tsp/elogia). Si el Excel NO trae esa columna (o la fila está vacía), se usa el
+        perfil seleccionado arriba — nada más."""
+        nom = (d.get("perfil") or "").strip().lower()
+        if nom == "tsp":
+            return PERFILES["ut_tsp"], "tsp"
+        if nom == "elogia":
+            return PERFILES["ut_elogia"], "elogia"
+        return perfil, perfil["nombre"]
+
+    def _desglose(datos):
+        d = {"tsp": 0, "elogia": 0, "sel": 0}
+        for f in datos:
+            nom = _pf(f)[1]
+            d["tsp" if nom == "tsp" else "elogia" if nom == "elogia" else "sel"] += 1
+        return d
 
     col_a, col_b = st.columns([1, 1])
     if col_a.button("🔍 Vista previa / contar", key="gx_prev"):
@@ -414,12 +467,15 @@ def modulo_generar_excel(perfil):
             return
         datos = datos[:n]
         n_rem = sum(len(d["remesas"]) for d in datos)
-        st.success(f"{len(datos)} factura(s) · {n_rem} remesas · Perfil: {perfil['nombre']}")
+        des = _desglose(datos)
+        st.success(f"{len(datos)} factura(s) · {n_rem} remesas · TSP: {des['tsp']} · "
+                   f"Elogia: {des['elogia']}"
+                   + (f" · perfil seleccionado ({perfil['nombre']}): {des['sel']}" if des['sel'] else ""))
         if datos:
             st.dataframe(pd.DataFrame([{
                 "N° Factura": d["numero_factura"], "CUFE": d["cufe"][:25] + "…" if len(d["cufe"]) > 25 else d["cufe"],
                 "Fecha": d["fecha"], "Remesas": len(d["remesas"]),
-                "Valor total": d["valor_total"]} for d in datos]),
+                "Perfil": _pf(d)[1], "Valor total": d["valor_total"]} for d in datos]),
                 use_container_width=True, hide_index=True)
 
     if col_b.button("⚡ Generar XML (.zip)", key="gx_gen", type="primary"):
@@ -435,57 +491,88 @@ def modulo_generar_excel(perfil):
         prog = st.progress(0.0, text="Consultando radicados en el RNDC…")
         total = sum(len(d["remesas"]) for d in datos) or 1
         hecho = 0
-        # Fase 1: radicados faltantes (igual que _generar_todos)
+        # Fase 1: radicados faltantes — con el perfil de CADA factura
         for d in datos:
+            pf, _nom = _pf(d)
             for rem in d["remesas"]:
                 consec = rem.get("consecutivo", "").strip()
                 rad = rem.get("radicado", "").strip()
                 if consec and rad.lower() in ("", "nan", "none", "0"):
-                    okr, res = consultar_radicado_remesa(consec, perfil)
+                    okr, res = consultar_radicado_remesa(consec, pf)
                     rem["radicado"] = res.get("radicado", "0") if okr else "0"
                 elif not rad or rad.lower() in ("nan", "none"):
                     rem["radicado"] = "0"
                 hecho += 1
                 prog.progress(min(hecho / total, 1.0),
                               text=f"Consultando RNDC… {hecho}/{total}")
-        # Fase 2: generar XML → zip
+        # Fase 2: generar XML → zip (con el perfil de cada factura)
         buf = io.BytesIO()
         errores = []
+        cont = {"tsp": 0, "elogia": 0, "sel": 0}
+        generadas = 0
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for d in datos:
+                pf, nom = _pf(d)
                 try:
-                    xml = generar_xml(d, perfil=perfil)
+                    xml = generar_xml(d, perfil=pf)
                     zf.writestr(f"FACTURA_{d['numero_factura']}.xml", xml)
+                    generadas += 1
+                    cont["tsp" if nom == "tsp" else "elogia" if nom == "elogia" else "sel"] += 1
                 except Exception as e:
                     errores.append(f"Factura {d.get('numero_factura','?')}: {e}")
         prog.empty()
-        st.success(f"✓ {len(datos) - len(errores)} XML generados [{perfil['nombre']}].")
+        st.success(f"✓ {generadas} XML generados · TSP: {cont['tsp']} · Elogia: {cont['elogia']}"
+                   + (f" · perfil seleccionado: {cont['sel']}" if cont['sel'] else "") + ".")
         if errores:
             st.error("Errores:\n" + "\n".join(errores))
         st.download_button("⬇️ Descargar XML (.zip)", buf.getvalue(),
-                           file_name=f"facturas_{perfil['nombre'].replace(' ', '_')}.zip",
+                           file_name="facturas_generadas.zip",
                            mime="application/zip", key="gx_dl")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MÓDULO 2: Cargar facturas a RNDC
 # ─────────────────────────────────────────────────────────────────────────────
+def _cr_expandir(archivos):
+    """Expande los archivos subidos a lista de (nombre, bytes_xml): los `.xml` tal cual;
+    de cada `.zip` extrae TODOS sus miembros `.xml` (útil para subir directo el zip que
+    genera 'Generar facturas vía Excel')."""
+    out = []
+    for a in archivos:
+        nombre = a.name
+        contenido = a.getvalue()
+        if nombre.lower().endswith(".zip"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(contenido)) as zf:
+                    for info in zf.infolist():
+                        if info.is_dir() or not info.filename.lower().endswith(".xml"):
+                            continue
+                        base = info.filename.replace("\\", "/").split("/")[-1]
+                        out.append((base, zf.read(info)))
+            except Exception:
+                pass   # zip corrupto/ilegible → se ignora
+        elif nombre.lower().endswith(".xml"):
+            out.append((nombre, contenido))
+    return out
+
+
 def modulo_cargar_rndc(perfil):
     st.header("📤 Cargar facturas a RNDC")
-    st.caption("Sube los XML de factura y envíalos al RNDC (proceso 86).")
+    st.caption("Sube los XML de factura (o un **.zip** con varios) y envíalos al RNDC (proceso 86).")
 
-    archivos = st.file_uploader("XML(s) de factura", type=["xml"],
+    archivos = st.file_uploader("XML(s) de factura o .zip con XMLs", type=["xml", "zip"],
                                 accept_multiple_files=True, key="cr_files")
-    if archivos:   # cachear contenido para que persista al cambiar de módulo
-        st.session_state["cr_data"] = [(a.name, a.getvalue()) for a in archivos]
+    if archivos:   # cachear contenido (expandiendo zips) para que persista al cambiar de módulo
+        st.session_state["cr_data"] = _cr_expandir(archivos)
 
     if st.button("🗑 Limpiar módulo", key="cr_clear"):
         _limpiar_modulo(["cr_"])
 
     files_data = st.session_state.get("cr_data", [])
     if not files_data:
-        st.info("Carga uno o varios XML.")
+        st.info("Carga uno o varios XML, o un .zip con XMLs.")
         return
+    st.caption(f"📎 {len(files_data)} XML listo(s) para enviar.")
 
     datos = [lib_rndc86.parse_factura_xml(nombre, b) for nombre, b in files_data]
 
@@ -3070,6 +3157,10 @@ def main():
             format="YYYY-MM-DD",
             help="Manifiestos expedidos ANTES de esta fecha no llevan FOPAT en el "
                  "cumplido; en su lugar se envía la Retención en la Fuente.")
+        st.number_input(
+            "Máx. facturas por cargue", min_value=1, max_value=1000, step=1, key="max_facturas",
+            value=int(st.session_state.get("max_facturas", MAX_FACTURAS_GENERAR)),
+            help="Tope de facturas a generar por lote en 'Generar facturas vía Excel'.")
     st.sidebar.caption("V1.5 · versión web")
 
     # Render del módulo activo.
