@@ -409,3 +409,127 @@ pandas        # Excel loader (opcional, degrada con gracia si no está)
 openpyxl      # lectura/escritura Excel
 pdfplumber    # extracción de datos de PDFs (extraer_datos_rg)
 ```
+
+---
+
+## 🤖 Automatización RPA de carga de facturas (PLANEADO — futuro)
+
+Automatizar el flujo diario de **carga de facturas RG** que hoy se hace a mano con fe-tool web. **Corre 1×/día**; hay días **sin facturas** → si no hay, **no hace nada** (skip, sin desgaste).
+
+**Flujo manual actual (lo que se automatiza):**
+1. **facture.co** (`plataforma.facture.co`) → login → filtrar por **fecha = ayer** (día actual − 1) → descargar documentos en **PDF**.
+2. La plataforma pide un correo y envía un **link de descarga**; abrir el correo → clic al link → baja un **zip con los PDFs (RG)**.
+3. fe-tool → **Extraer datos RG** → adjuntar PDFs → check "usar Referencia como consecutivo" → procesar → `datos_rg.xlsx`.
+4. fe-tool → **Generar facturas vía Excel** → cargar `datos_rg` (auto-mapeo) → **Generar XML (.zip)**.
+5. fe-tool → **Cargar facturas a RNDC** → subir el zip → enviar (**proceso 86**).
+
+**Datos confirmados (para el diseño):**
+- facture.co **NO tiene CAPTCHA** (login ni descarga) → automatizable por navegador (Playwright).
+- El **RNDC responde bien desde IP de EE.UU.** (fe-tool Streamlit está desplegado allá y funciona) → una nube/US-runner sirve.
+
+### ✅ HALLAZGO CLAVE: facture.co SÍ tiene API REST (verificado 2026-08-29, en vivo sobre la cuenta UT)
+
+Host: **`https://api.facture.co`**. Auth: header **`Authorization: Bearer <JWT>`**. El JWT vive en `localStorage['JWT']`, **dura 24 h** (claim `total_lifetime = 1440 min`, `iss=api.facture.co`) → la automatización **loguea 1×/corrida** y le sobra. Probado: llamando los endpoints yo mismo con solo el JWT (fuera del navegador de la app) **responden 200** — o sea es consumible por HTTP puro (requests/httpx), **sin Playwright ni correo para la consulta**.
+
+**Endpoints mapeados (todos POST, body JSON):**
+- **Listar facturas emitidas** (= pantalla "Descarga masiva"):
+  `POST /PLColab.Documents/Documents/GetDocumentsDescargaMasiva?pageIndex=1&pageSize=10&includeCreditNoteStatus=true`
+  Body: `{issueDateBegin, issueDateEnd, documentTypeCodes:["FACTURA-UBL"], branches:[], processes:[], source:"Outbound", isSoporteAdquisicion:false}`. **Fechas en formato `MM/DD/YYYY`**. `source:"Outbound"`=Emitidos. Respuesta paginada `{items[], totalItemCount, pageNumber, pageSize, totalPages}`. Cada item: `number, DocumentOnlyPrefix, documentType, statusDian, status, issueDate, receiver{name,identification=NIT,identificationType}, amount, LDF, documentId(GUID), processCode, branchCode, UUID_CUFE, ...`. **Con esto se resuelve el "skip si no hay facturas": si `totalItemCount==0` no hace nada.**
+- **Listar (pantalla "Consulta documentos")**: `POST /PLColab.Documents/Documents/GetDocumentsWeb` (body similar + `documentSubType`, `tituloValorCheck`). Ojo UI: en ese form la **fecha final debe ser POSTERIOR a la inicial** (rango 25→26 para traer el día 25; igual-igual lo marca inválido).
+- **Datos estructurados de UNA factura (UBL en JSON)**: `POST /PLColab.Documents/Document/Content3` body `{documentLdf}` → `{DocumentCurrencyCode, UUID, UblVersion, CustomizationID, AccountingSupplierParty, AccountingCustomerParty, InvoiceLines, ...}`. **⭐ Esto entrega NIT, cliente, líneas y valores directamente → la automatización podría saltarse el parseo de PDF (`lib_extraer`) por completo y armar el `datos_rg` desde JSON.**
+- **Metadatos ricos de una factura**: `POST /PLColab.Documents/Document/GetDocumentAsync` body `{documentLdf}` → `{numero_cd, LDF, UUID, receiver, issuer, amount, taxTotal, retentionTotal, status, URI, UBL, viewer, relatedDocuments, ...}`.
+- **Adjuntos**: `POST /PLColab.Documents/Document/Attachments/ListUrlV2` body `{documentLdf}` (0 items para facturas normales).
+
+**`documentLdf` (identificador de documento)** = string `"FACTURA-UBL(<NIT_emisor>;<numero>;<fecha YYYY-MM-DD>;<sucursal>;<proceso>)"`, p.ej. `FACTURA-UBL(901101271;412049;2026-08-26;PRINCIPAL;PRINCIPAL)`. La URL del visor web es ese LDF en **base64** (`/documents/viewer/<b64(LDF)>/1`).
+
+**Descarga de PDF/XML**: `GetDocumentAsync` devuelve `URI` (PDF) y `UBL` (XML) — endpoints con forma `/PLColab.Documents/Document/<ldf-encoded>/<code>/Binario`. Desde el app cargan bien (el botón ⬇ del visor descarga un blob ya traído). Llamados en standalone con solo `Authorization` dan **500** → les falta replicar algún header extra del interceptor Angular (probable tenant/`x-` header). **Pendiente de afinar al construir** (o usar la ruta de correo como respaldo). Para el objetivo real (obtener datos → generar XML → RNDC), **Content3 en JSON hace innecesario el PDF**.
+
+- **Descarga masiva por correo (respaldo)**: en "Descarga masiva", seleccionar + ⬇ abre modal (PDF/XML/Contenedor/Aceptación DIAN) que **pide un correo y envía un link** (zip). Es el flujo manual actual; se puede replicar + IMAP si se necesitara el PDF real.
+
+**Login (verificado 2026-08-29, capturando el login real):** el flujo de autenticación **NO es un POST simple** — pasa por un gateway aparte (`urlMicrologin`/`apiManagmentUrl`, no `api.facture.co` directo) y usa una capa de **cifrado/seguridad** (`Auth/GetMasterKey`, `Auth/MigrateToNewSecurityModel`, `masterKey` en localStorage). Endpoints de auth en el bundle: `PLColab.Identity/Auth/{GetMasterKey, IsMainContract, Login, LoginAuth, LoginExpirate, MigrateToNewSecurityModel}`. El único POST en claro que se ve es `Auth/IsMainContract` (body `{u, p, ft}`) que solo valida; el JWT lo emite el gateway y la app lo deja en **`localStorage['JWT']`** (dura **24 h**, `iss=api.facture.co`).
+
+→ **Decisión: NO reversar el login en Python (frágil, cifrado). Arquitectura HÍBRIDA:**
+1. **Playwright headless SOLO para el login** (facture no tiene CAPTCHA): abrir `plataforma.facture.co/plataforma/login` → escribir usuario/clave (de Secrets) → submit → esperar `/home` → leer `localStorage['JWT']`.
+2. **Todo lo demás en HTTP puro** (`requests`/`httpx`) con ese `Authorization: Bearer <JWT>`: `GetDocumentsDescargaMasiva` (fecha=ayer) → por factura `Content3` (consecutivo de `"02"`) → `consultar_radicado_remesa` → `generar_xml` → `enviar_factura_rndc` (proceso 86).
+
+Como el token dura 24 h y el job corre 1×/día, es **un login por corrida**. Verificado end-to-end: el `localStorage['JWT']` recién emitido por el login funciona para llamar la API (probado con `GetDocumentsDescargaMasiva` y `Content3`).
+
+### 🗂️ Separación de proyectos (DECISIÓN del usuario 2026-08-29)
+
+**La automatización NO va dentro de fe-tool.** fe-tool sigue siendo **solo la webapp manual de Streamlit** (sin cron, sin pipeline, intacto). La tarea diaria vive en un **repo aparte**.
+
+> **✅ CREADO (2026-08-29): `C:\Users\Lizarazo\Desktop\plcolab-rpa`.** Bot que importa fe-tool (mismos módulos que `webapp/app.py`) y hace login(Playwright, selectores reales `usernameField`/`passwordField`/`button[type=submit]`) → `GetDocumentsDescargaMasiva` → `Content3` (consec `"02"`) → `lib_excel.parsear` → `consultar_radicado_remesa` → `generar_xml` → `enviar_factura_rndc`. Archivos: `pipeline.py`, `facture_client.py`, `fetool_bridge.py`, `settings.py` (NO `config.py`, para no chocar con el paquete `config/` de fe-tool), `.github/workflows/diario.yml`, `docs/DESPLIEGUE.md`.
+>
+> **✅ PROBADO end-to-end (2026-08-29)** con las 3 facturas del 25/08 (411929/30/31, 35 remesas). Login OK, datos OK (NIT+dígito, CUFE 96, radicados resueltos), XML generado y **enviado al RNDC de verdad**. Resultado (esperado, ya estaban cargadas): el XML del bot es **estructuralmente válido** (llega a "Paso3" y el RNDC lo valida a nivel de negocio). Nota: `PLAYWRIGHT_HEADLESS=1` y forzar `sys.stdout.reconfigure(utf-8)` (la consola Windows cp1252 rompe con ✓/✗).
+>
+> **Códigos de respuesta RNDC proceso 86** (`AtenderMensajeRNDC`): el webservice **normalmente devuelve el mensaje completo** con descripción (`lib_rndc86._limpiar_msg` lo extrae, igual que fe-tool); **ocasionalmente responde escueto** solo con el código (sin `:` ni texto) — es transitorio del RNDC, no del cliente. NO hace falta diccionario de códigos en el bot (se quitó); se muestra el mensaje real tal cual.
+> - **FAC038**: "El xml reportado tiene un numero de factura que ya está reportado previamente…: <nº>" → **duplicado** (ya cargada). Corta antes de validar remesas.
+> - **FAC080**: "El xml reportado tiene una **remesa sin cumplir**: <radicado>" → esa remesa aún no está cumplida en el RNDC (estado de negocio, no error de XML).
+> - **FAC081**: "El xml reportado **no tiene numero de factura de referencia en la remesa**." → error **por remesa** (real, confirmado en el portal RNDC: sale en cada remesa afectada). En la 411931 salió en 10 de 11 remesas + FAC080 en la restante.
+> - Éxito real → `<ingresoid>` (radicado de la factura), que `lib_rndc86` formatea como "Radicado RNDC: <n>".
+>
+> **⚠️ Dos rarezas del RNDC (webservice proceso 86), verificadas:**
+> 1. **Alterna respuesta escueta vs completa**: a veces devuelve solo "Error FAC080" (sin `:` ni descripción ni líneas), a veces el detalle completo con `;Linea:N` por remesa. Inconsistente, del lado del RNDC.
+> 2. **Numeración de línea poco fiable**: el `;Linea:N` no siempre corresponde al orden real de la remesa (ej. FAC080 vino con `;Linea:1` pero su radicado `159602487` es la remesa #11). Por eso, para cruzar error→remesa hay que mapear **por radicado cuando el mensaje lo cita** (FAC080), y solo por línea cuando no (FAC081).
+>
+> **✅ NUEVO en la webapp (2026-08-29) — "Cargar facturas a RNDC" ahora muestra DETALLE POR REMESA** (como el portal RNDC), para que no sea confuso ver un solo error por factura cuando el rechazo es por remesa:
+> - `webapp/lib_rndc86.enviar_factura_rndc(..., detallado=True)` → 3-tupla `(exito, mensaje, detalle)`; `parse_detalle_errores(resp_text)` extrae `[{codigo, mensaje, linea, radicado}]` de la respuesta cruda.
+> - `webapp/app.py::modulo_cargar_rndc`: además de la tabla por factura (Estado+Mensaje), arma **"Detalle por remesa"** cruzando cada remesa (consec/radicado/valor de `parse_factura_xml`) con su mensaje (por radicado, si no por línea). Los errores de **nivel factura** (ej. FAC038 duplicado, que no mapean a una remesa) se muestran en TODAS las filas de remesa de esa factura (para que no queden en blanco).
+> - **Enriquecimiento de código escueto** (`lib_rndc86.FAC_DESCRIPCIONES` + `_enriquecer_codigos`): cuando el RNDC devuelve solo "Error FACxxx" sin descripción, se le anexa la descripción conocida; si el RNDC YA manda su texto (con `:`), se respeta el suyo (no se pisa). Resuelve el caso "el mensaje salía vacío/solo el código" para FAC038.
+> - El parámetro `detallado` es opcional (default False) → otros llamadores no se afectan. (El bot `plcolab-rpa` también hereda el enriquecimiento vía `lib_rndc86`.)
+>
+> ⚠️ El bot usa el MISMO `generar_xml` que la webapp manual (que sube facturas válidas y devuelve ingresoid) → el template es correcto; FAC080/FAC081 en 411931 vienen del estado de esa factura (remesa sin cumplir), no del bot. **Pendiente clave: corrida de ÉXITO real** sobre una factura con TODAS las remesas cumplidas y no duplicada → si da ingresoid, bot 100% validado; si diera FAC081, habría un campo real por ajustar. (Submodule fe-tool también pendiente.)
+
+Layout del repo del bot:
+
+```
+facture-rndc-bot/                 ← REPO NUEVO (automatización)
+├── .github/workflows/diario.yml  ← el "cron" (corre en la nube de GitHub, 1×/día; NO en el server de fe-tool ni en el PC)
+├── pipeline.py                   ← login(Playwright) → listar → Content3 → radicado → generar_xml → RNDC 86
+├── fe-tool/                       ← fe-tool como GIT SUBMODULE (se importa, no se copia)
+├── requirements.txt              ← playwright, requests, + deps de fe-tool
+└── estado.json                   ← idempotencia
+```
+
+**Reutilización (decisión: "el bot importa fe-tool", una sola fuente de verdad):** el bot trae fe-tool como **git submodule** y lo importa vía `sys.path` — **cero cambios en fe-tool** (no hay que empaquetarlo):
+```python
+import sys; sys.path.insert(0, "fe-tool")
+from core.xml_generator import generar_xml
+from services.rndc_service import consultar_radicado_remesa
+from webapp.lib_rndc86 import enviar_factura_rndc
+```
+Si se mejora `generar_xml` en fe-tool, el bot lo hereda actualizando el submodule. **Credenciales** (facture + RNDC) en los **Secrets del repo del bot**, inyectadas en runtime (mismo patrón que `bootstrap_perfiles.py`); nunca en fe-tool, nunca commiteadas.
+
+**Arquitectura (gratis + nube):** — **como SÍ hay API, el camino feliz es HTTP puro (sin navegador ni correo).**
+- **Opción A (recomendada):** **GitHub Actions** programado (cron 1×/día) en el repo del bot que corre `pipeline.py`: **login con Playwright** (leer `localStorage['JWT']`) → luego **HTTP puro** (`requests`): `GetDocumentsDescargaMasiva` (fecha=ayer) → si hay items, por cada factura `Content3` (datos UBL, consecutivo de `"02"`) → `consultar_radicado_remesa` → `generar_xml` → `enviar_factura_rndc` (proceso 86). Credenciales en **GitHub Secrets**. Gratis (2000 min/mes; job diario de minutos). Playwright solo para el login; **sin IMAP ni parseo de PDF**.
+- **Opción B:** **Oracle Cloud Free VM** + **n8n** self-hosted orquestando un script Playwright + Execute Command (pipeline Python). Nota: n8n **no** hace scraping solo — igual llama a Playwright; n8n solo orquesta + notifica + reintenta.
+- Alternativa sin nube: el **PC del usuario** con Task Scheduler (gratis, evita temas de IP).
+
+**El pipeline de fe-tool YA es headless (funciones puras, sin UI — la automatización las encadena):**
+- `webapp/lib_extraer.procesar_pdfs(pdfs, usar_ref)` → filas `datos_rg` (ya con **NIT+DV**, consecutivo Elogia con `0`, columna **`perfil`** tsp/elogia; multipágina).
+- `webapp/lib_excel.auto_mapear(df)` + `webapp/lib_excel.parsear(df, mapping, filtro, ...)` → agrupa en facturas con remesas (incluye `perfil` por factura).
+- `services.rndc_service.consultar_radicado_remesa(consec, perfil)` → radicado por consecutivo.
+- `core.xml_generator.generar_xml(datos, perfil)` → XML por factura (perfil = `PERFILES['ut_tsp'|'ut_elogia']` según la columna `perfil`; TSP `300`/`120`, Elogia `101`).
+- `webapp.lib_rndc86.enviar_factura_rndc(xml_bytes, usuario, password, nit_empresa)` → carga proceso 86.
+
+**Reglas de negocio ya resueltas en fe-tool (dejan la automatización trivial):** DV auto del NIT (módulo 11), prefijo `0` de Elogia, detección/split de perfil por consecutivo (columna `perfil`), extracción **multipágina**, radicado auto por consecutivo, **zip** en Cargar facturas (`_cr_expandir`), y máx. facturas configurable (⚙️ Ajustes).
+
+**Pendientes al construir la automatización:**
+1. ~~Confirmar API de facture.co~~ ✅ **HECHO** (ver hallazgo arriba: API REST confirmada, consulta+datos por HTTP puro).
+2. ~~Capturar el endpoint de login~~ ✅ **RESUELTO**: login cifrado vía gateway → **no se reversa**; se hace con **Playwright** (login → leer `localStorage['JWT']`, 24 h) y el resto en HTTP puro. Ver "Login" arriba.
+3. ✅ **Confirmado: `Content3` trae TODO lo que hoy saca el PDF** → la automatización arma el `datos_rg` **directo del JSON, sin descargar ni parsear PDF** (`lib_extraer` deja de ser necesario en el camino API). **Verificado sobre factura 411930 (12 remesas): las 12 líneas traen consecutivo, y Σ de valores de línea = `amount` exacto (28.789.948).** Mapeo columna RG → ruta en `Content3`/listado:
+   - `numero_factura` → **listado** `number` (+`DocumentOnlyPrefix`, `DocumentOnlyNumber`). *No está en Content3.*
+   - `fecha_generacion` → **listado** `issueDate`. *No está en Content3.*
+   - `cufe` → `Content3.UUID` (96 chars).
+   - `nit` → `Content3.AccountingCustomerParty.PartyIdentification_ID` (base **sin DV**, igual que el PDF → aplicar `_nit_con_dv`). `nombre_cliente` → `...Party_Name`.
+   - `descripcion` → `Content3.InvoiceLines[i].Item.Description`.
+   - `consecutivo_remesa` → **usar la propiedad `Name=="02"`** de `InvoiceLines[i].Item.AdditionalItemProperty[]`, **NO `CodigoItem`**. Motivo (verificado en 411930): `CodigoItem` a veces trae el **radicado** en vez del consecutivo (remesa placa WLT112: `CodigoItem=163661861` que es el radicado, cuando el consecutivo real es `30013623`). La propiedad `"02"` dio el consecutivo correcto en las 12/12 líneas (`30xxxxx`, sin anomalías). `ConsecutivoItem`=índice de línea; `ValorTotalItem`(=prop `"03"`)=valor.
+   - `valor_unitario` → `InvoiceLines[i].PriceAmount` (o `ValorTotalItem`). `valor_total_factura` → **listado** `amount`. `cantidad_remesas_rg` → `InvoiceLines.length`.
+   - `perfil` → derivado del consecutivo `"02"` (regla `_perfil_por_consecutivo`). Con `"02"` como fuente, los `163661861` (radicados) ya **no** contaminan el split de perfil.
+   - `radicado` → **SIEMPRE se consulta** con `consultar_radicado_remesa(consecutivo, perfil)` a partir del consecutivo (`"02"`). NO usar la propiedad `"01"` de facture: por decisión del usuario, el radicado del origen a veces viene mal puesto (igual que el `CodigoItem`), así que la fuente confiable es la consulta al RNDC. (Contexto: en el XML de fe-tool `"01"`=radicado y `"02"`=consecutivo por diseño — ver `core/xml_generator.generar_invoice_line`: consecutivo en `StandardItemIdentification` schemeID 999 + prop `"02"`; radicado en `SellersItemIdentification` + prop `"01"`. Es el mismo estándar que el UBL de facture, por eso `"02"` es canónico para leer el consecutivo.)
+   - **⚠️ OJO flujo manual actual (PDF)**: el PDF se genera del mismo UBL; es probable que la REFERENCIA del PDF muestre `CodigoItem` (el radicado `163661861`) en esa remesa → revisar si alguna factura ya cargada quedó con el radicado en lugar del consecutivo. La ruta API con `"02"` **corrige** ese error.
+   - Emisor bajo `AccountingSupplierParty` (`Party_Identification` + `Party_IdentificationDigitVerification`), retenciones en `WithholdingTaxTotal`.
+4. **Orquestador headless** `pipeline.py` (login → listar → Content3 → generar_xml → enviar proceso 86) para que GitHub Actions lo invoque en un paso.
+5. **Idempotencia:** registrar qué facturas ya se subieron (no duplicar si corre dos veces / reintentos).
+6. **Reporte diario** (cargadas / fallidas) por correo o notificación.
+7. Lógica **"ayer"** (día − 1, formato `MM/DD/YYYY`) y **skip si `totalItemCount==0`**.

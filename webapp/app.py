@@ -579,8 +579,7 @@ def modulo_cargar_rndc(perfil):
     st.subheader("Facturas detectadas")
     _df_fact = pd.DataFrame([{
         "Archivo": d["archivo"], "N° Factura": d["nf"], "Cliente": d["cliente"],
-        "CUFE": d["cufe"], "Remesas": len(d["remesas"]),
-        "Estado": ("⚠ " + d["error"]) if d["error"] else "⏳ Pendiente de envío"}
+        "CUFE": d["cufe"], "Remesas": len(d["remesas"])}
         for d in datos])
     st.dataframe(_df_fact, use_container_width=True, hide_index=True)
     _copiar_tabla(_df_fact, "cp_rndc_fact")
@@ -602,17 +601,59 @@ def modulo_cargar_rndc(perfil):
         password = perfil.get("rndc_password", "")
         nit = perfil.get("nit_socio", "")
         prog = st.progress(0.0, text="Enviando…")
-        resultados = []
+        resultados = []      # nivel factura
+        filas_rem_res = []   # nivel remesa (como el portal del RNDC)
         for i, ((nombre, b), d) in enumerate(zip(files_data, datos), 1):
-            exito, mensaje = lib_rndc86.enviar_factura_rndc(b, usuario, password, nit)
-            resultados.append({"Archivo": d["archivo"], "N° Factura": d["nf"],
-                               "Resultado": ("✓ " if exito else "✗ ") + mensaje})
+            exito, mensaje, detalle = lib_rndc86.enviar_factura_rndc(
+                b, usuario, password, nit, detallado=True)
+            resultados.append({
+                "Archivo": d["archivo"], "N° Factura": d["nf"],
+                "Estado": "✓ Aceptada" if exito else "✗ Rechazada",
+                "Mensaje": mensaje})
+            # Cruce error → remesa: SOLO errores de nivel remesa (FAC080/FAC081); los de
+            # nivel factura (FAC038) van solo a la tabla de factura, no a una remesa.
+            # Los que CITAN radicado (FAC080) se mapean por radicado (exacto); los que no
+            # (FAC081), por número de línea (el RNDC numera raro, por eso el radicado manda).
+            det_rem = [e for e in detalle if e.get("nivel") == "remesa"]
+            por_rad = {e["radicado"]: e for e in det_rem if e.get("radicado")}
+            por_lin = {e["linea"]: e for e in det_rem
+                       if e.get("linea") and not e.get("radicado")}
+            # ¿el RNDC detalló errores por remesa (respuesta completa)? Si NO (respuesta
+            # escueta, sin ;Linea ni radicado), NO repartimos el mensaje de factura en
+            # todas las remesas (sería falso); el motivo queda a nivel factura.
+            hay_detalle_rem = bool(por_rad or por_lin)
+            for idx, r in enumerate(d["remesas"], 1):
+                e = por_rad.get(str(r["radicado"])) or por_lin.get(idx)
+                if e:
+                    msg_rem = e["mensaje"]            # error específico de esta remesa
+                elif exito:
+                    msg_rem = "✓ Aceptada"
+                elif hay_detalle_rem:
+                    msg_rem = ""                      # esta remesa no tuvo error propio
+                else:
+                    msg_rem = "(ver mensaje de la factura)"  # RNDC no detalló por remesa
+                filas_rem_res.append({
+                    "N° Factura": d["nf"], "Consecutivo": r["consecutivo"],
+                    "Radicado": r["radicado"], "Valor ($)": r["valor"],
+                    "Mensaje": msg_rem})
             prog.progress(i / len(files_data), text=f"{i}/{len(files_data)} {d['archivo']}")
         prog.empty()
-        st.subheader("Resultado del envío")
+
+        st.subheader("Resultado del envío (por factura)")
         _df_res = pd.DataFrame(resultados)
         st.dataframe(_df_res, use_container_width=True, hide_index=True)
         _copiar_tabla(_df_res, "cp_rndc_envio")
+
+        # Detalle por remesa (como el RNDC): útil cuando el rechazo es por remesa.
+        hay_msg_rem = any(f["Mensaje"] not in ("", "✓ Aceptada") for f in filas_rem_res)
+        if filas_rem_res:
+            st.subheader("Detalle por remesa")
+            if hay_msg_rem:
+                st.caption("El RNDC valida remesa por remesa. Aquí ves el mensaje de "
+                           "cada una (por eso una factura puede fallar por una sola remesa).")
+            _df_rem_res = pd.DataFrame(filas_rem_res)
+            st.dataframe(_df_rem_res, use_container_width=True, hide_index=True)
+            _copiar_tabla(_df_rem_res, "cp_rndc_envio_rem")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

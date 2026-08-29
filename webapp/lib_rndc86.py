@@ -49,12 +49,51 @@ SOAP_ENVELOPE_TMPL = """<?xml version="1.0" encoding="UTF-8"?>
 </soapenv:Envelope>"""
 
 
+# Descripciones de códigos del RNDC (proceso 86). El webservice A VECES devuelve
+# solo el código ("Error FAC038") sin descripción, aunque el portal sí la muestre.
+# Cuando llega escueto, se anexa esta descripción. Si el RNDC YA manda su texto, se
+# respeta el suyo (no se sobreescribe).
+FAC_DESCRIPCIONES = {
+    "FAC038": "El xml reportado tiene un numero de factura que ya está reportado "
+              "previamente por la empresa de transporte (factura duplicada).",
+    "FAC080": "El xml reportado tiene una remesa sin cumplir.",
+    "FAC081": "El xml reportado no tiene numero de factura de referencia en la remesa.",
+}
+
+# Códigos que son de la FACTURA ENTERA (no de una remesa). El RNDC a veces les pone
+# un ";Linea:N" igual, pero NO deben mapearse a una remesa: van solo a nivel factura.
+CODIGOS_NIVEL_FACTURA = {"FAC038"}
+
+
+def _enriquecer_codigos(msg):
+    """A cada 'Error FACxxx' que NO venga seguido de ':' (respuesta escueta del RNDC)
+    le anexa la descripción conocida. Si ya trae ':' + texto, no lo toca."""
+    if not msg:
+        return msg
+
+    def _rep(m):
+        cod = m.group(1)
+        desc = FAC_DESCRIPCIONES.get(cod)
+        return f"Error {cod}: {desc}" if desc else m.group(0)
+
+    return _re.sub(r'Error\s+(FAC\d+)(?!\s*:)', _rep, msg)
+
+
 def enviar_factura_rndc(contenido_bytes, usuario, password, nit_empresa,
-                        endpoint=None, timeout=45):
+                        endpoint=None, timeout=45, detallado=False):
     """Envía un XML (bytes) al RNDC como Factura Electrónica (proceso 86).
-    Retorna (exito: bool, mensaje: str). Equivalente a _soap_call del desktop."""
+
+    Retorna (exito: bool, mensaje: str). Si `detallado=True`, retorna una 3-tupla
+    (exito, mensaje, detalle) donde `detalle` es la lista de errores por línea/remesa
+    del RNDC (ver parse_detalle_errores). Equivalente a _soap_call del desktop."""
     if endpoint is None:
         endpoint = ENDPOINTS["Producción (rndcws)"]
+
+    def _ret(exito, mensaje, resp_text=None):
+        mensaje = _enriquecer_codigos(mensaje)
+        if detallado:
+            return exito, mensaje, (parse_detalle_errores(resp_text) if resp_text else [])
+        return exito, mensaje
 
     b64 = base64.b64encode(contenido_bytes).decode("ascii")
     rndc_xml = RNDC_XML_TMPL.format(
@@ -73,13 +112,50 @@ def enviar_factura_rndc(contenido_bytes, usuario, password, nit_empresa,
     try:
         resp = _requests.post(url, data=soap_body.encode("utf-8"),
                               headers=headers, timeout=timeout)
-        return _parsear_respuesta(resp.text)
+        exito, mensaje = _parsear_respuesta(resp.text)
+        return _ret(exito, mensaje, resp.text)
     except _requests.exceptions.ConnectionError:
-        return False, f"Sin conexión a {endpoint}"
+        return _ret(False, f"Sin conexión a {endpoint}")
     except _requests.exceptions.Timeout:
-        return False, f"Tiempo de espera agotado ({timeout}s)"
+        return _ret(False, f"Tiempo de espera agotado ({timeout}s)")
     except Exception as e:
-        return False, str(e)[:180]
+        return _ret(False, str(e)[:180])
+
+
+def parse_detalle_errores(resp_text):
+    """Extrae los errores POR LÍNEA/REMESA de la respuesta cruda del RNDC.
+
+    El RNDC devuelve, dentro de <ErrorMSG>, segmentos tipo:
+        "Error FAC080: ...sin cumplir:159602487 ;Linea:1  Error FAC081: ... ;Linea:2 ..."
+    Retorna lista de dicts: {codigo, mensaje, linea (int|None), radicado (str|None)}.
+    - `linea`   = el número ';Linea:N' que reporta el RNDC (posición de la remesa).
+    - `radicado`= el radicado citado en el texto (p.ej. FAC080 'sin cumplir:<rad>'), si lo hay.
+    Sirve para cruzar cada error con su remesa (por radicado, o por línea)."""
+    if not resp_text:
+        return []
+    m = _re.search(r'<[^>]*:?return[^>]*>(.*?)</[^>]*:?return>',
+                   resp_text, _re.DOTALL | _re.IGNORECASE)
+    inner = _html.unescape(m.group(1)) if m else _html.unescape(resp_text)
+    # Texto dentro de <ErrorMSG> (puede venir anidado <ErrorMSG><ErrorMSG>…)
+    me = _re.search(r'<ErrorMSG>(.*)</ErrorMSG>', inner, _re.DOTALL | _re.IGNORECASE)
+    texto = me.group(1) if me else inner
+    texto = _re.sub(r'</?ErrorMSG>', ' ', texto)
+
+    detalle = []
+    patron = r'Error\s+([A-Z]{2,}\d+)\s*:\s*(.*?)(?=(?:Error\s+[A-Z]{2,}\d+\s*:)|$)'
+    for seg in _re.finditer(patron, texto, _re.DOTALL):
+        codigo = seg.group(1)
+        cuerpo = seg.group(2).strip()
+        ml = _re.search(r';?\s*Linea:\s*(\d+)', cuerpo, _re.IGNORECASE)
+        linea = int(ml.group(1)) if ml else None
+        mr = _re.search(r'sin\s+cumplir\s*:\s*(\d+)', cuerpo, _re.IGNORECASE)
+        radicado = mr.group(1) if mr else None
+        desc = _re.sub(r';?\s*Linea:\s*\d+', '', cuerpo, flags=_re.IGNORECASE).strip()
+        desc = _re.sub(r'\s{2,}', ' ', desc).strip(' .;')
+        nivel = "factura" if codigo in CODIGOS_NIVEL_FACTURA else "remesa"
+        detalle.append({"codigo": codigo, "mensaje": f"Error {codigo}: {desc}",
+                        "linea": linea, "radicado": radicado, "nivel": nivel})
+    return detalle
 
 
 def _parsear_respuesta(resp_text):
