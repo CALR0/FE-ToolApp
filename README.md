@@ -155,6 +155,53 @@ totales, retención) y **N remesas**, y las vuelca en la plantilla UBL 2.1 de la
 cada línea el consecutivo, el radicado y el valor de su remesa. El resultado es el XML que luego se
 sube al RNDC por el proceso 86.
 
+---
+
+## Adaptar el generador a otra empresa: qué es variable y qué está fijo
+
+El script actual está pensado para una UT específica (transporte, cliente Drummond). Buena parte
+del XML se rellena con variables, **pero hay valores hardcodeados que otra empresa debe cambiar**.
+Se dividen en tres niveles:
+
+### A) Ya parametrizado (no se toca el código, solo los datos de entrada)
+
+| Origen | Campos |
+|---|---|
+| **Datos de la factura** (`datos`) | `numero_factura`, `cufe`, `fecha`, `valor_total`, `nit_cliente`, `digito_cliente`, `nombre_cliente`, y las `remesas` (consecutivo, radicado, peso, valor, descripción). |
+| **Perfil activo** (`config/perfiles.py`) | `nit_socio`, `nombre_socio`, `email_from`, `email_contact_supplier`. |
+| **Constantes de la UT** (`config/perfiles.py`) | `NIT_UT`, `NOMBRE_UT`, `PREFIJO`, `UNIDAD_MEDIDA`. |
+| **Calculado** | retención (1 % del valor), vencimiento (+30 días), nº de líneas. |
+
+### B) Hardcodeado en `core/xml_generator.py` — **HAY que cambiarlo por empresa**
+
+Esto es lo que un tercero debe editar para emitir con otra empresa/certificado/cliente:
+
+| Qué | Dónde / valor actual | Nota |
+|---|---|---|
+| **Firma digital + certificado X509** | Dos bloques `ds:Signature` (contenedor e Invoice): `SignatureValue`, `X509Certificate`, digests, `IssuerSerial` | Es una **plantilla fija** de un documento real. Para otra empresa se necesita **su propio certificado/firma**. El script **no firma criptográficamente**, arma el contenedor con ese bloque. |
+| **Autorización DIAN** | `sts:InvoiceAuthorization` (`18764092002504`), `AuthorizationPeriod` (2025-04-15 a 2027-04-15), rango `From`/`To` (1–1000) | Número de resolución, vigencia y rango de numeración: propios de cada empresa/prefijo. |
+| **Proveedor de software** | `SoftwareProvider` (`ProviderID`, `SoftwareID`), `SoftwareSecurityCode` | Del proveedor tecnológico (aquí facture). Cambian si el proveedor es otro. |
+| **Dirección y datos del emisor** | `AccountingSupplierParty`: `47001`/`SANTA MARTA`/`Magdalena`/`CR 1 C 22 58...`, `IndustryClassificationCode` `4923` | Dirección, códigos de ciudad/departamento y CIIU de la empresa emisora. |
+| **Contacto del emisor** | `Contact`: nombre `VANESSA CELIS`, teléfono `3216208110` | El correo sí sale del perfil; el nombre y teléfono están fijos. |
+| **CustomFields de emisor** | `NombreCiudadEmisor` `Barranquilla`, `NombreDepartamentoEmisor` `Atlantico`, `lugarExpedicion` `SANTAMARTA_TSP` | Revisar/uniformar por empresa. |
+| **Cliente hardcodeado** | `AccountingCustomerParty`: dirección `11001000`/`BOGOTA`/`CALLE 72 N 10 07...` y `email_cli = "facturacion@drummondltd.com"` | El NIT y el nombre del cliente sí son variables, pero **la dirección y el correo del cliente están fijos a Drummond**. Para otro cliente hay que parametrizarlos. |
+| **Estructura de accionistas** | Dos `ShareholderParty` al **50 %** (socio + UT) | Específico de una **Unión Temporal** de dos miembros. Otra empresa que no sea UT no lleva esto. |
+| **Retención en la fuente** | `WithholdingTaxTotal` y por línea: **1 %**, esquema `06`/`RFTE` | Retención de transporte. Cambia si el tipo/porcentaje de impuesto es otro. |
+| **Horas fijas** | `IssueTime`, `SigningTime` (ej. `18:00:12-05:00`) | Cosméticas; puede dejarse o parametrizarse. |
+
+### C) Fijo del estándar DIAN — normalmente **no se cambia**
+
+Espacios de nombres UBL, `ProfileID` (*Factura Electrónica de Venta*), `InvoiceTypeCode` `01`,
+`CustomizationID`, el NIT de la DIAN como `AuthorizationProvider`/validador (`800197268`), la URL de
+la política de firma, y la estructura del `ApplicationResponse` (respuesta de validación). Estos son
+iguales para todos los emisores en Colombia (ver la guía oficial de la DIAN/RNDC).
+
+> **Resumen para adaptar a otra empresa:** cambiar (1) el **certificado/firma**, (2) la **autorización
+> DIAN** (resolución, vigencia, prefijo, rango), (3) los **datos y dirección del emisor**, (4) la
+> **estructura de accionistas** si no es UT, (5) la **retención** si aplica otro impuesto, y (6)
+> **parametrizar el cliente** (dirección y correo, hoy fijos a Drummond). Todo lo demás sale de los
+> datos de la factura, del perfil o es estándar DIAN.
+
 ## Estructura del proyecto
 
 ```
